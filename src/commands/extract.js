@@ -118,18 +118,19 @@ export function registerExtract(program) {
             return headings;
           })()`);
         } else {
-          const selector = opts.selector;
-          const attr = opts.attr;
-          const all = opts.all;
-          result = await evalFn(`(() => {
-            const elements = ${all}
-              ? Array.from(document.querySelectorAll('${selector}'))
-              : [document.querySelector('${selector}')].filter(Boolean);
-            return elements.map(el => {
-              if ('${attr || ''}') return el.getAttribute('${attr || ''}');
-              return el.textContent?.trim() || '';
-            });
-          })()`);
+          // Use parameter passing (not string interpolation) to prevent injection
+          result = await handle.page.evaluate(
+            ({ selector, attr, all }) => {
+              const elements = all
+                ? Array.from(document.querySelectorAll(selector))
+                : [document.querySelector(selector)].filter(Boolean);
+              return elements.map(el => {
+                if (attr) return el.getAttribute(attr);
+                return el.textContent?.trim() || '';
+              });
+            },
+            { selector: opts.selector, attr: opts.attr || null, all: !!opts.all },
+          );
         }
 
         const title = await getTitle(handle);
