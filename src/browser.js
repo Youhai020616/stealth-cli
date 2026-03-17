@@ -7,7 +7,7 @@
  */
 
 import { withRetry, navigateWithRetry } from './retry.js';
-import { randomDelay, postNavigationBehavior } from './humanize.js';
+import { postNavigationBehavior } from './humanize.js';
 import { isDaemonRunning } from './daemon.js';
 import { daemonNavigate, daemonRequest } from './client.js';
 import { loadProfile, touchProfile, saveCookiesToProfile, loadCookiesFromProfile } from './profiles.js';

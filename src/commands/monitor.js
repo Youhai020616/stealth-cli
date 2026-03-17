@@ -4,7 +4,7 @@
 
 import ora from 'ora';
 import chalk from 'chalk';
-import { launchBrowser, closeBrowser, navigate, evaluate, waitForReady } from '../browser.js';
+import { launchBrowser, closeBrowser, navigate, waitForReady } from '../browser.js';
 import { randomDelay } from '../humanize.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
