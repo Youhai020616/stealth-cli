@@ -1,0 +1,5 @@
+# Test URL list for batch command
+https://example.com
+https://httpbin.org/ip
+# Comment — should be skipped
+https://httpbin.org/user-agent
