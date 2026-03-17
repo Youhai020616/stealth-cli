@@ -6,6 +6,7 @@
  */
 
 import http from 'http';
+import crypto from 'crypto';
 import { log } from '../output.js';
 import { createBrowser, createContext, TEXT_EXTRACT_SCRIPT } from '../utils/browser-factory.js';
 
@@ -17,9 +18,12 @@ export function registerServe(program) {
     .option('--host <host>', 'Host to bind to', '127.0.0.1')
     .option('--proxy <proxy>', 'Default proxy for all requests')
     .option('--no-headless', 'Show browser window')
+    .option('--token <token>', 'API token for authentication (auto-generated if not set)')
+    .option('--no-auth', 'Disable authentication (only recommended on localhost)')
     .action(async (opts) => {
       const port = parseInt(opts.port);
       const host = opts.host;
+      const apiToken = opts.token || crypto.randomBytes(24).toString('hex');
 
       log.info('Starting stealth API server...');
 
@@ -72,9 +76,18 @@ export function registerServe(program) {
           const body = method === 'POST' ? await parseBody(req) : {};
           const query = Object.fromEntries(url.searchParams);
 
-          // --- Health ---
+          // --- Health (no auth required) ---
           if (route === '/health') {
             return json(res, { ok: true, engine: 'camoufox', pages: pages.size });
+          }
+
+          // --- Auth check ---
+          if (opts.auth !== false) {
+            const authHeader = req.headers['authorization'];
+            const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '') : '';
+            if (token !== apiToken) {
+              return json(res, { error: 'Unauthorized. Use: -H "Authorization: Bearer <token>"' }, 401);
+            }
           }
 
           // --- Create tab ---
@@ -196,6 +209,12 @@ export function registerServe(program) {
 
       server.listen(port, host, () => {
         log.success(`Stealth API server running on http://${host}:${port}`);
+        if (opts.auth !== false) {
+          log.info(`API Token: ${apiToken}`);
+          log.dim(`  Use: curl -H "Authorization: Bearer ${apiToken}" ...`);
+        } else {
+          log.warn('Authentication disabled (--no-auth)');
+        }
         log.dim('  Endpoints:');
         log.dim('    GET  /health                    — Server status');
         log.dim('    POST /tabs                      — Create tab { url }');
