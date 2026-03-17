@@ -62,7 +62,7 @@ export function registerCrawl(program) {
         const startOrigin = new URL(startUrl).origin;
         const visited = new Set();
         const queue = [{ url: startUrl, depth: 0 }];
-        const results = [];
+        let resultCount = 0;
         let outputStream;
 
         if (opts.output) {
@@ -80,10 +80,10 @@ export function registerCrawl(program) {
           } else {
             console.log(line);
           }
-          results.push(result);
+          resultCount++;
         };
 
-        while (queue.length > 0 && results.length < maxPages) {
+        while (queue.length > 0 && resultCount < maxPages) {
           const { url, depth } = queue.shift();
 
           if (visited.has(url)) continue;
@@ -92,7 +92,7 @@ export function registerCrawl(program) {
           if (includeRegex && !includeRegex.test(url)) continue;
           if (excludeRegex && excludeRegex.test(url)) continue;
 
-          spinner.text = `[${results.length + 1}/${maxPages}] Crawling: ${url.slice(0, 60)}...`;
+          spinner.text = `[${resultCount + 1}/${maxPages}] Crawling: ${url.slice(0, 60)}...`;
 
           try {
             // Navigate with retry
@@ -156,7 +156,7 @@ export function registerCrawl(program) {
         if (outputStream) outputStream.end();
 
         spinner.stop();
-        log.success(`Crawl complete: ${results.length} pages crawled`);
+        log.success(`Crawl complete: ${resultCount} pages crawled`);
         log.dim(`  Start: ${startUrl}`);
         log.dim(`  Depth: ${maxDepth}, Visited: ${visited.size}`);
         if (opts.output) log.dim(`  Output: ${opts.output}`);

@@ -32,9 +32,27 @@ export function registerServe(program) {
 
       // Page pool
       const pages = new Map(); // id → { page, context, lastUsed }
+      const MAX_TABS = 20;
       let idCounter = 0;
 
       async function createPage() {
+        // Evict oldest tab if limit reached
+        if (pages.size >= MAX_TABS) {
+          let oldestId = null;
+          let oldestTime = Infinity;
+          for (const [id, entry] of pages) {
+            if (entry.lastUsed < oldestTime) {
+              oldestTime = entry.lastUsed;
+              oldestId = id;
+            }
+          }
+          if (oldestId) {
+            const old = pages.get(oldestId);
+            await old.context.close().catch(() => {});
+            pages.delete(oldestId);
+          }
+        }
+
         const context = await createContext(browser);
         const page = await context.newPage();
         const id = `tab-${++idCounter}`;

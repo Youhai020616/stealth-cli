@@ -25,7 +25,10 @@ function loadData() {
 
 function saveData(data) {
   ensureDir();
-  fs.writeFileSync(PROXIES_FILE, JSON.stringify(data, null, 2));
+  // Atomic write: write to temp file then rename (prevents corruption on crash)
+  const tmpPath = PROXIES_FILE + '.tmp';
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+  fs.renameSync(tmpPath, PROXIES_FILE);
 }
 
 /**
