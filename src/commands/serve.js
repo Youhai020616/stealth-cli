@@ -6,10 +6,8 @@
  */
 
 import http from 'http';
-import { launchOptions } from 'camoufox-js';
-import { firefox } from 'playwright-core';
-import os from 'os';
 import { log } from '../output.js';
+import { createBrowser, createContext, TEXT_EXTRACT_SCRIPT } from '../utils/browser-factory.js';
 
 export function registerServe(program) {
   program
@@ -26,25 +24,14 @@ export function registerServe(program) {
       log.info('Starting stealth API server...');
 
       // Launch browser
-      const hostOS = os.platform() === 'darwin' ? 'macos' : os.platform() === 'win32' ? 'windows' : 'linux';
-      const options = await launchOptions({
-        headless: opts.headless,
-        os: hostOS,
-        humanize: true,
-        enable_cache: true,
-      });
-      const browser = await firefox.launch(options);
+      const browser = await createBrowser({ headless: opts.headless });
 
       // Page pool
       const pages = new Map(); // id → { page, context, lastUsed }
       let idCounter = 0;
 
       async function createPage() {
-        const context = await browser.newContext({
-          viewport: { width: 1280, height: 720 },
-          locale: 'en-US',
-          timezoneId: 'America/Los_Angeles',
-        });
+        const context = await createContext(browser);
         const page = await context.newPage();
         const id = `tab-${++idCounter}`;
         pages.set(id, { page, context, lastUsed: Date.now() });
@@ -130,11 +117,7 @@ export function registerServe(program) {
               }
 
               case 'text': {
-                const text = await page.evaluate(() => {
-                  const c = document.body.cloneNode(true);
-                  c.querySelectorAll('script,style,noscript').forEach((e) => e.remove());
-                  return c.innerText || '';
-                });
+                const text = await page.evaluate(TEXT_EXTRACT_SCRIPT);
                 return json(res, { ok: true, text, url: page.url() });
               }
 

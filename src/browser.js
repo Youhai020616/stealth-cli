@@ -6,9 +6,6 @@
  *   2. Daemon mode  — reuses background browser (faster)
  */
 
-import { launchOptions } from 'camoufox-js';
-import { firefox } from 'playwright-core';
-import os from 'os';
 import { withRetry, navigateWithRetry } from './retry.js';
 import { randomDelay, postNavigationBehavior } from './humanize.js';
 import { isDaemonRunning } from './daemon.js';
@@ -16,16 +13,7 @@ import { daemonNavigate, daemonText, daemonScreenshot, daemonRequest } from './c
 import { loadProfile, touchProfile, saveCookiesToProfile, loadCookiesFromProfile } from './profiles.js';
 import { restoreSession, captureSession } from './session.js';
 import { getNextProxy, getRandomProxy, reportProxy } from './proxy-pool.js';
-
-/**
- * Detect host OS for fingerprint matching
- */
-function getHostOS() {
-  const platform = os.platform();
-  if (platform === 'darwin') return 'macos';
-  if (platform === 'win32') return 'windows';
-  return 'linux';
-}
+import { getHostOS, createBrowser, TEXT_EXTRACT_SCRIPT } from './utils/browser-factory.js';
 
 /**
  * Build proxy configuration
@@ -115,16 +103,11 @@ export async function launchBrowser(opts = {}) {
   const hostOS = profileData?.fingerprint?.os || getHostOS();
   const proxy = buildProxy(proxyStr);
 
-  const options = await launchOptions({
+  const browser = await createBrowser({
     headless,
     os: hostOS,
-    humanize: true,
-    enable_cache: true,
     proxy: proxy || undefined,
-    geoip: !!proxy,
   });
-
-  const browser = await firefox.launch(options);
 
   const contextOptions = {
     viewport,
@@ -273,15 +256,7 @@ export async function getTextContent(handle) {
     return res?.text || '';
   }
 
-  return handle.page.evaluate(() => {
-    const body = document.body;
-    if (!body) return '';
-
-    const clone = body.cloneNode(true);
-    clone.querySelectorAll('script, style, noscript').forEach((el) => el.remove());
-
-    return clone.innerText || clone.textContent || '';
-  });
+  return handle.page.evaluate(TEXT_EXTRACT_SCRIPT);
 }
 
 /**

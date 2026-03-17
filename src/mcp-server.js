@@ -18,10 +18,8 @@
  *   }
  */
 
-import { launchOptions } from 'camoufox-js';
-import { firefox } from 'playwright-core';
-import os from 'os';
 import { createRequire } from 'module';
+import { createBrowser, createContext, TEXT_EXTRACT_SCRIPT } from './utils/browser-factory.js';
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require('../package.json');
@@ -127,9 +125,7 @@ class McpServer {
 
   async ensureBrowser() {
     if (this.browser && this.browser.isConnected()) return this.browser;
-    const hostOS = os.platform() === 'darwin' ? 'macos' : os.platform() === 'win32' ? 'windows' : 'linux';
-    const options = await launchOptions({ headless: true, os: hostOS, humanize: true, enable_cache: true });
-    this.browser = await firefox.launch(options);
+    this.browser = await createBrowser();
     return this.browser;
   }
 
@@ -144,11 +140,7 @@ class McpServer {
       }
     }
     await this.ensureBrowser();
-    const context = await this.browser.newContext({
-      viewport: { width: 1280, height: 720 },
-      locale: 'en-US',
-      timezoneId: 'America/Los_Angeles',
-    });
+    const context = await createContext(this.browser);
     const page = await context.newPage();
     const entry = { context, page };
     this.contexts.set(key, entry);
@@ -168,11 +160,7 @@ class McpServer {
           return text(`URL: ${page.url()}\n\n${snapshot}`);
         }
 
-        const content = await page.evaluate(() => {
-          const c = document.body.cloneNode(true);
-          c.querySelectorAll('script,style,noscript').forEach((e) => e.remove());
-          return c.innerText || '';
-        });
+        const content = await page.evaluate(TEXT_EXTRACT_SCRIPT);
         const title = await page.title().catch(() => '');
         return text(`Title: ${title}\nURL: ${page.url()}\n\n${content.slice(0, 15000)}`);
       }

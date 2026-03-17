@@ -14,8 +14,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { launchOptions } from 'camoufox-js';
-import { firefox } from 'playwright-core';
+import { createBrowser, createContext, TEXT_EXTRACT_SCRIPT } from './utils/browser-factory.js';
 
 const STEALTH_DIR = path.join(os.homedir(), '.stealth');
 const SOCKET_PATH = path.join(STEALTH_DIR, 'daemon.sock');
@@ -51,16 +50,6 @@ function cleanup() {
 }
 
 /**
- * Get host OS for fingerprint
- */
-function getHostOS() {
-  const platform = os.platform();
-  if (platform === 'darwin') return 'macos';
-  if (platform === 'win32') return 'windows';
-  return 'linux';
-}
-
-/**
  * Start the daemon server
  */
 export async function startDaemon(opts = {}) {
@@ -81,13 +70,7 @@ export async function startDaemon(opts = {}) {
 
   // Launch browser
   log('Launching Camoufox browser...');
-  const options = await launchOptions({
-    headless: true,
-    os: getHostOS(),
-    humanize: true,
-    enable_cache: true,
-  });
-  const browser = await firefox.launch(options);
+  const browser = await createBrowser({ headless: true });
   log('Browser launched');
 
   // Track contexts for reuse
@@ -121,19 +104,7 @@ export async function startDaemon(opts = {}) {
       }
     }
 
-    const {
-      locale = 'en-US',
-      timezone = 'America/Los_Angeles',
-      viewport = { width: 1280, height: 720 },
-    } = contextOpts;
-
-    const context = await browser.newContext({
-      viewport,
-      locale,
-      timezoneId: timezone,
-      permissions: ['geolocation'],
-      geolocation: { latitude: 37.7749, longitude: -122.4194 },
-    });
+    const context = await createContext(browser, contextOpts);
 
     const page = await context.newPage();
     const entry = { context, page, lastUsed: Date.now() };
@@ -202,11 +173,7 @@ export async function startDaemon(opts = {}) {
       if (route === '/text') {
         const { key = 'default' } = body;
         const ctx = await getOrCreateContext(key);
-        const text = await ctx.page.evaluate(() => {
-          const clone = document.body.cloneNode(true);
-          clone.querySelectorAll('script, style, noscript').forEach((el) => el.remove());
-          return clone.innerText || '';
-        });
+        const text = await ctx.page.evaluate(TEXT_EXTRACT_SCRIPT);
         res.end(JSON.stringify({ ok: true, text, url: ctx.page.url() }));
         return;
       }
