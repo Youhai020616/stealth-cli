@@ -13,12 +13,6 @@
 
 ---
 
-## Demo
-
-<p align="center">
-  <img src="demo.gif" alt="stealth-cli demo" width="800" />
-</p>
-
 ## Why
 
 Headless Chrome gets fingerprinted. Playwright gets blocked. Stealth plugins become the fingerprint.
@@ -30,115 +24,97 @@ Wrap that in a developer-friendly CLI with 16 commands, and you get a tool that 
 ## Install
 
 ```bash
-# From npm (recommended)
 npm install -g stealth-cli
-
-# From source
-git clone https://github.com/user/stealth-cli.git
-cd stealth-cli
-npm install        # Installs deps + downloads Camoufox browser (~300MB)
-npm link           # Makes 'stealth' command globally available
 ```
 
 > First run downloads the Camoufox browser binary (~300MB). Subsequent runs are instant.
 
+<details>
+<summary>Install from source</summary>
+
+```bash
+git clone https://github.com/user/stealth-cli.git
+cd stealth-cli
+npm install        # Installs deps + downloads Camoufox browser
+npm link           # Makes 'stealth' command globally available
+```
+
+</details>
+
 ## Quick Start
 
 ```bash
-# Browse a page with anti-detection
-stealth browse https://example.com
-
-# Take a screenshot
-stealth screenshot https://example.com -o page.png
-
-# Search Google without getting blocked
-stealth search google "best coffee beans" -f json
-
-# Extract all links from a page
-stealth extract https://example.com --links
-
-# Crawl a site
-stealth crawl https://example.com --depth 2 --limit 50 -o results.jsonl
-
-# Interactive browsing (REPL)
-stealth interactive --url https://example.com
+stealth browse https://example.com                       # Visit a page
+stealth screenshot https://example.com -o page.png       # Screenshot
+stealth search google "best coffee beans" -f json        # Search Google
+stealth extract https://example.com --links              # Extract links
+stealth crawl https://example.com -d 2 -l 50 -o out.jsonl  # Crawl
+stealth interactive --url https://example.com            # REPL mode
 ```
 
 ## Commands
 
-### Core (11 commands)
+### Core (11)
 
 | Command | Description |
 |---------|-------------|
-| `stealth browse <url>` | Visit URL, print page content (text/json/snapshot) |
-| `stealth screenshot <url>` | Take a screenshot (PNG/JPEG, full page, custom size) |
-| `stealth search <engine> <query>` | Search with anti-detection (14 engines) |
-| `stealth extract <url>` | Extract links, images, meta, headings, CSS selectors |
-| `stealth crawl <url>` | Recursive crawling with depth/filter/delay control |
-| `stealth interactive` | Interactive REPL with 20+ browsing commands |
-| `stealth pdf <url>` | Save page as PDF / full-page screenshot |
-| `stealth batch <file>` | Batch process URLs from a file |
-| `stealth monitor <url>` | Watch a page for changes (price drops, stock alerts) |
-| `stealth fingerprint` | Check browser fingerprint & anti-detection status |
-| `stealth serve` | Start HTTP API server for external integrations |
+| `browse <url>` | Visit URL, print content (text/json/snapshot/markdown) |
+| `screenshot <url>` | Screenshot (PNG/JPEG, full page, custom viewport) |
+| `search <engine> <query>` | Search 14 engines with anti-detection |
+| `extract <url>` | Extract links, images, meta, headings, CSS selectors |
+| `crawl <url>` | Recursive crawling with depth/filter/delay control |
+| `interactive` | REPL with 20+ commands (goto, click, type, eval...) |
+| `pdf <url>` | Save page as PDF |
+| `batch <file>` | Batch process URLs from file |
+| `monitor <url>` | Watch for changes (price drops, stock alerts) |
+| `fingerprint` | Check fingerprint & anti-detection status |
+| `serve` | HTTP API server with Bearer token auth |
 
-### Management (5 commands)
+### Management (5)
 
 | Command | Description |
 |---------|-------------|
-| `stealth daemon start/stop/status` | Background browser for instant startup (~1s vs ~6s) |
-| `stealth profile create/list/delete` | Persistent browser identities (8 presets + random) |
-| `stealth proxy add/list/test` | Proxy pool with rotation and health checking |
-| `stealth config set/get/list/reset` | Global defaults (~/.stealth/config.json) |
-| `stealth mcp` | MCP server for Claude Desktop / Cursor |
+| `daemon start/stop/status` | Background browser (~1s vs ~6s startup) |
+| `profile create/list/delete` | Persistent identities (8 presets + random) |
+| `proxy add/list/test` | Proxy pool with rotation & health checking |
+| `config set/get/list/reset` | Global defaults (~/.stealth/config.json) |
+| `mcp` | MCP server for Claude Desktop / Cursor |
 
 ---
 
-## Usage
+## Usage Examples
 
 ### Browse
 
 ```bash
-stealth browse https://example.com                      # Text output
-stealth browse https://example.com -f json              # JSON with metadata
-stealth browse https://example.com -f snapshot           # Accessibility tree
-stealth browse https://example.com --humanize            # Human behavior simulation
-stealth browse https://example.com --profile us-desktop  # Use saved identity
+stealth browse https://example.com                       # Text output
+stealth browse https://example.com -f json               # JSON with metadata
+stealth browse https://example.com -f snapshot            # Accessibility tree
+stealth browse https://example.com --humanize             # Human behavior simulation
+stealth browse https://example.com --profile us-desktop   # Saved identity
 stealth browse https://example.com --proxy http://proxy:8080
-```
-
-### Screenshot
-
-```bash
-stealth screenshot https://example.com -o page.png
-stealth screenshot https://example.com --full            # Full page
-stealth screenshot https://example.com --width 1920 --height 1080
 ```
 
 ### Search
 
-14 supported engines with structured result extraction.
-
-Google uses a special anti-detection flow: visits homepage → types query → presses Enter (not direct URL).
+Google uses a special anti-detection flow: visits homepage → types query with human-like timing → presses Enter.
 
 ```bash
 stealth search google "web scraping tools" -f json       # Auto-humanized
-stealth search google "query" -f json --warmup           # Extra: visit random site first
+stealth search google "query" -f json --warmup           # Visit random site first
 stealth search duckduckgo "privacy browser" -f json
-stealth search bing "anti-detect browser" -f json
 stealth search youtube "tutorial" -f json                # Video metadata
 stealth search github "camoufox" -f json                 # Repo results
-stealth search amazon "mechanical keyboard" -f json
 ```
 
-**All 14 engines:** google, bing, duckduckgo, youtube, github, amazon, reddit, wikipedia, twitter, linkedin, tiktok, stackoverflow, npmjs, yelp
+**14 engines:** google, bing, duckduckgo, youtube, github, amazon, reddit, wikipedia, twitter, linkedin, tiktok, stackoverflow, npmjs, yelp
 
 ### Extract
 
 ```bash
 stealth extract https://example.com --links              # All links
 stealth extract https://example.com --images             # All images
-stealth extract https://example.com --meta               # Title, description, OG tags
+stealth extract https://example.com --meta               # Title, description, OG
 stealth extract https://example.com --headers            # h1-h6 headings
 stealth extract https://example.com -s ".price" --all    # CSS selector
 stealth extract https://example.com -s "a" -a "href" --all  # Attributes
@@ -147,44 +123,19 @@ stealth extract https://example.com -s "a" -a "href" --all  # Attributes
 ### Crawl
 
 ```bash
-stealth crawl https://example.com -d 2 -l 50             # Depth 2, max 50 pages
-stealth crawl https://example.com -o results.jsonl        # Save to file
-stealth crawl https://example.com --include "blog"        # URL regex filter
-stealth crawl https://example.com --exclude "login|admin"
-stealth crawl https://example.com --delay 2000 --humanize # Human-like crawling
-stealth crawl https://example.com --proxy-rotate          # Rotate through proxy pool
+stealth crawl https://example.com -d 2 -l 50            # Depth 2, max 50 pages
+stealth crawl https://example.com -o results.jsonl       # Save to file
+stealth crawl https://example.com --include "blog"       # URL regex filter
+stealth crawl https://example.com --delay 2000 --humanize
+stealth crawl https://example.com --proxy-rotate         # Rotate per page
 ```
 
 ### Monitor
 
-Watch pages for changes — ideal for price tracking, stock alerts, content monitoring.
-
 ```bash
-stealth monitor https://shop.com/item -s ".price" -i 60  # Check price every 60s
+stealth monitor https://shop.com/item -s ".price" -i 60  # Check every 60s
 stealth monitor https://shop.com/item --contains "In Stock"
 stealth monitor https://example.com --not-contains "Sold Out"
-stealth monitor https://example.com --json -n 10          # JSON output, 10 checks max
-```
-
-### Batch
-
-```bash
-echo "https://example.com
-https://github.com
-https://httpbin.org/ip" > urls.txt
-
-stealth batch urls.txt -c browse --skip-errors            # Browse all
-stealth batch urls.txt -c screenshot -o ./screenshots/    # Screenshot all
-stealth batch urls.txt -c extract -s "h1"                 # Extract from all
-```
-
-### Fingerprint
-
-```bash
-stealth fingerprint                   # Show current browser fingerprint
-stealth fingerprint --check           # Run anti-detection tests (CreepJS, WebDriver)
-stealth fingerprint --compare 3       # Launch 3 times, compare if fingerprints vary
-stealth fingerprint --profile jp-desktop --json
 ```
 
 ### Interactive REPL
@@ -193,153 +144,141 @@ stealth fingerprint --profile jp-desktop --json
 stealth interactive --url https://example.com
 
 stealth> goto https://google.com
-stealth> search duckduckgo hello world
 stealth> click "button.submit"
-stealth> hclick "a.link"              # Human-like click (mouse movement)
+stealth> hclick "a.link"              # Human-like click (bezier curve)
 stealth> type "input[name=q]" hello
 stealth> htype "input[name=q]" hello  # Human-like typing (variable speed)
 stealth> scroll down 3
-stealth> text                         # Page text
-stealth> snapshot                     # Accessibility tree
-stealth> links                        # All links
+stealth> text / snapshot / links      # Inspect page
 stealth> screenshot page.png
-stealth> eval document.title          # Run JavaScript
-stealth> back / forward / reload
+stealth> eval document.title
 stealth> exit
 ```
 
 ---
 
-## Daemon Mode
+## Key Features
 
-Keep a browser alive in the background. Commands reuse it instantly.
+### Daemon Mode
+
+Keep a browser alive in the background for instant command execution.
 
 ```bash
 stealth daemon start                   # Start background browser
 stealth browse https://example.com     # ~1.2s (vs ~6s cold start)
-stealth browse https://other.com       # ~1.2s
-stealth daemon status                  # Check status
 stealth daemon stop                    # Shut down (auto-stops after 5min idle)
 ```
 
-## Browser Profiles
+### Browser Profiles
 
-Persistent browser identities with unique fingerprints. Cookies auto-save between sessions.
+Persistent identities with unique fingerprints. Cookies auto-save between sessions.
 
 ```bash
 stealth profile create work --preset us-desktop
-stealth profile create japan --preset jp-desktop
-stealth profile create rand1 --random               # Random fingerprint
-stealth profile list
-stealth profile presets                              # Show all 8 presets
+stealth profile create rand1 --random
 
-# Use profile — fingerprint + cookies auto-applied
 stealth browse https://example.com --profile work
-# → User-Agent: Windows, locale: en-US, timezone: America/New_York
+# → Fingerprint: Windows, en-US, America/New_York
 ```
 
-**Presets:** `us-desktop` · `us-laptop` · `uk-desktop` · `de-desktop` · `jp-desktop` · `cn-desktop` · `mobile-ios` · `mobile-android`
+**8 presets:** `us-desktop` · `us-laptop` · `uk-desktop` · `de-desktop` · `jp-desktop` · `cn-desktop` · `mobile-ios` · `mobile-android`
 
-## Session Persistence
-
-Save and restore browsing sessions (cookies + last URL + history).
+### Session Persistence
 
 ```bash
 stealth browse https://example.com --session my-task --profile work
-# → Cookies saved, URL remembered
+# → Cookies + URL + history saved
 
-# Later: auto-restores cookies and navigates to last URL
 stealth browse https://other.com --session my-task
+# → Auto-restores cookies and last URL
 ```
 
-## Proxy Support
+### Proxy Pool
 
 ```bash
-# Single proxy
-stealth browse https://example.com --proxy http://user:pass@host:port
-
-# Proxy pool with rotation
 stealth proxy add http://proxy1:8080 --label us --region US
 stealth proxy add http://proxy2:8080 --label eu --region EU
-stealth proxy test                                   # Test all proxies
-stealth proxy list                                   # List with status
+stealth proxy test                                   # Health check
 stealth browse https://example.com --proxy-rotate    # Auto-rotate
-stealth crawl https://example.com --proxy-rotate     # Rotate per page
 ```
 
-GeoIP: When using a proxy, Camoufox auto-matches locale, timezone, and geolocation to the proxy's exit IP.
+GeoIP: Camoufox auto-matches locale, timezone, and geolocation to proxy exit IP.
 
-## Pipe-Friendly
+### Global Configuration
 
-stdout = data, stderr = status. Perfect for Unix pipes:
+Set defaults so you don't repeat flags:
+
+```bash
+stealth config set locale zh-CN
+stealth config set humanize true
+stealth config set retries 3
+stealth config set format json
+stealth config list
+```
+
+All core commands respect global config. CLI flags always override.
+
+### Pipe-Friendly
+
+stdout = data, stderr = status:
 
 ```bash
 stealth browse https://api.example.com -f json | jq '.title'
 stealth search google "query" -f json | jq '.results[].url'
 stealth extract https://example.com --links -f json | jq '.data[].url'
-stealth crawl https://example.com -o - | wc -l
 ```
 
-## HTTP API Server
+---
+
+## Integrations
+
+### HTTP API Server
 
 ```bash
 stealth serve --port 9377
-# → API Token: a1b2c3...  (auto-generated, printed on startup)
+# → Prints auto-generated API token on startup
 
-# Create tab + browse (token required)
+curl localhost:9377/health                                          # No auth
+
 curl -X POST localhost:9377/tabs \
   -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
-  -d '{"url":"https://example.com"}'
+  -d '{"url":"https://example.com"}'                               # Create tab
 
-# Get page text
-curl localhost:9377/tabs/tab-1/text -H 'Authorization: Bearer <token>'
-
-# Health check (no auth needed)
-curl localhost:9377/health
-
-# Disable auth (localhost only)
-stealth serve --no-auth
-
-# Custom token
-stealth serve --token my-secret-token
-
-# All endpoints: /health, /tabs, /tabs/:id/navigate, /tabs/:id/snapshot,
-#   /tabs/:id/text, /tabs/:id/screenshot, /tabs/:id/click, /tabs/:id/type,
-#   /tabs/:id/evaluate, /tabs/:id/close, /shutdown
+curl localhost:9377/tabs/tab-1/text -H 'Authorization: Bearer <token>'  # Get text
 ```
 
-## As a Library (SDK)
+**Options:** `--token <custom>` · `--no-auth` (localhost only) · `--host 0.0.0.0`
+
+**Endpoints:** `/health` · `/tabs` (POST/GET) · `/tabs/:id/navigate` · `/tabs/:id/text` · `/tabs/:id/snapshot` · `/tabs/:id/screenshot` · `/tabs/:id/click` · `/tabs/:id/type` · `/tabs/:id/evaluate` · `/tabs/:id` (DELETE) · `/shutdown`
+
+### MCP Server (Claude Desktop / Cursor)
+
+```json
+{
+  "mcpServers": {
+    "stealth": {
+      "command": "stealth",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**7 tools:** `stealth_browse` · `stealth_screenshot` · `stealth_search` · `stealth_extract` · `stealth_click` · `stealth_type` · `stealth_evaluate`
+
+### SDK (Library Mode)
 
 ```javascript
 import { launchBrowser, closeBrowser, navigate, getTextContent } from 'stealth-cli';
 
-const handle = await launchBrowser({
-  profile: 'us-desktop',
-  humanize: true,
-});
-
+const handle = await launchBrowser({ profile: 'us-desktop', humanize: true });
 await navigate(handle, 'https://example.com');
 const text = await getTextContent(handle);
-console.log(text);
-
 await closeBrowser(handle);
 ```
 
-## Configuration
-
-Set global defaults so you don't repeat flags:
-
-```bash
-stealth config set locale zh-CN          # Default Chinese locale
-stealth config set humanize true         # Always simulate human behavior
-stealth config set retries 3             # Default 3 retries
-stealth config set format json           # Default JSON output
-stealth config list                      # Show all settings
-stealth config reset                     # Reset to defaults
-```
-
-Stored at `~/.stealth/config.json`.
+---
 
 ## How Anti-Detection Works
 
@@ -361,7 +300,24 @@ stealth-cli
 | WebRTC leak | Built-in protection |
 | TLS fingerprint | Firefox native (not Chromium) |
 
-No JavaScript shims. No detectable wrappers. The browser reports spoofed values natively.
+No JavaScript shims. No detectable wrappers. The browser natively reports spoofed values.
+
+## Error Handling
+
+stealth-cli provides structured errors with contextual hints:
+
+```
+✖ Failed to navigate to https://example.com
+  Hint: Page load timed out. Try --wait <ms> or --retries <n>
+
+✖ Google detected automation and blocked the request
+  Hint: Try: --proxy <proxy>, --warmup, --humanize, or use a different engine
+
+✖ Profile "work" not found
+  Hint: Create with: stealth profile create work
+```
+
+Exit codes: `0` success · `3` browser launch · `4` navigation/blocked · `5` extraction · `7` proxy · `8` profile
 
 ## Common Options
 
@@ -375,7 +331,7 @@ Available on all core commands:
 | `--session <name>` | Persist/restore browsing session |
 | `--cookies <file>` | Import Netscape-format cookie file |
 | `--humanize` | Simulate human behavior |
-| `--retries <n>` | Max retries on failure (default: 2) |
+| `--retries <n>` | Max retries on failure |
 | `--no-headless` | Show browser window |
 | `-f, --format` | Output format: text, json, jsonl, snapshot, markdown |
 
@@ -384,9 +340,8 @@ Available on all core commands:
 ```
 Version:     0.6.0
 Commands:    16
-Tests:       151 passing
-Source:      6,000+ lines
-Files:       52
+Tests:       151 passing (18 test files)
+Source:      5,900 lines (39 source files)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)
