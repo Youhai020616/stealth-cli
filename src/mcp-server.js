@@ -182,11 +182,26 @@ class McpServer {
         const isGoogle = args.engine === 'google';
 
         if (isGoogle) {
+          const { humanType, randomDelay } = await import('./humanize.js');
           await page.goto('https://www.google.com', { waitUntil: 'domcontentloaded', timeout: 15000 });
-          await page.waitForTimeout(1000);
+          await randomDelay(800, 2000);
+
+          // Handle cookie consent (EU/UK)
           try {
-            await page.fill('textarea[name="q"], input[name="q"]', args.query);
-            await page.keyboard.press('Enter');
+            const consentBtn = page.locator(
+              'button:has-text("Accept all"), button:has-text("Accept"), button:has-text("I agree")',
+            );
+            if (await consentBtn.first().isVisible({ timeout: 1500 })) {
+              await consentBtn.first().click({ timeout: 2000 });
+              await randomDelay(500, 1000);
+            }
+          } catch {}
+
+          // Human-like typing (consistent with CLI search command)
+          try {
+            await humanType(page, 'textarea[name="q"], input[name="q"]', args.query, {
+              pressEnter: true,
+            });
           } catch {
             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
           }
