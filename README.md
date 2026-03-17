@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D18-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-59%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-90%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -284,16 +284,25 @@ stealth crawl https://example.com -o - | wc -l
 
 ```bash
 stealth serve --port 9377
+# → API Token: a1b2c3...  (auto-generated, printed on startup)
 
-# Create tab + browse
-curl -X POST localhost:9377/tabs -H 'Content-Type: application/json' \
+# Create tab + browse (token required)
+curl -X POST localhost:9377/tabs \
+  -H 'Authorization: Bearer <token>' \
+  -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com"}'
 
 # Get page text
-curl localhost:9377/tabs/tab-1/text
+curl localhost:9377/tabs/tab-1/text -H 'Authorization: Bearer <token>'
 
-# Screenshot (base64)
-curl localhost:9377/tabs/tab-1/screenshot
+# Health check (no auth needed)
+curl localhost:9377/health
+
+# Disable auth (localhost only)
+stealth serve --no-auth
+
+# Custom token
+stealth serve --token my-secret-token
 
 # All endpoints: /health, /tabs, /tabs/:id/navigate, /tabs/:id/snapshot,
 #   /tabs/:id/text, /tabs/:id/screenshot, /tabs/:id/click, /tabs/:id/type,
@@ -373,11 +382,11 @@ Available on all core commands:
 ## Project Stats
 
 ```
-Version:     0.5.0
+Version:     0.5.1
 Commands:    16
-Tests:       59 passing
-Source:      5,700+ lines
-Files:       44
+Tests:       90 passing
+Source:      5,800+ lines
+Files:       47
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)
