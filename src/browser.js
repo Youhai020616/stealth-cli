@@ -14,6 +14,7 @@ import { loadProfile, touchProfile, saveCookiesToProfile, loadCookiesFromProfile
 import { restoreSession, captureSession } from './session.js';
 import { getNextProxy, getRandomProxy, reportProxy } from './proxy-pool.js';
 import { getHostOS, createBrowser, TEXT_EXTRACT_SCRIPT } from './utils/browser-factory.js';
+import { log } from './output.js';
 
 /**
  * Build proxy configuration
@@ -81,7 +82,9 @@ export async function launchBrowser(opts = {}) {
         proxyStr = profileData.proxy;
       }
       touchProfile(profileName);
-    } catch {}
+    } catch (err) {
+      log.warn(`Profile "${profileName}" failed to load: ${err.message}`);
+    }
   }
 
   // --- Proxy pool rotation ---
@@ -140,7 +143,9 @@ export async function launchBrowser(opts = {}) {
   if (sessionInfo?.lastUrl && sessionInfo.lastUrl !== 'about:blank') {
     try {
       await page.goto(sessionInfo.lastUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    } catch {}
+    } catch (err) {
+      log.warn(`Session URL restore failed (${sessionInfo.lastUrl}): ${err.message}`);
+    }
   }
 
   return {
