@@ -7,6 +7,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { ProxyError } from './errors.js';
 
 const STEALTH_DIR = path.join(os.homedir(), '.stealth');
 const PROXIES_FILE = path.join(STEALTH_DIR, 'proxies.json');
@@ -177,7 +178,7 @@ export async function testProxy(proxyUrl) {
         password: url.password || undefined,
       };
     } catch {
-      throw new Error(`Invalid proxy URL: ${proxyUrl}`);
+      throw new ProxyError(proxyUrl, new Error('Invalid proxy URL format'));
     }
 
     browser = await createBrowser({ headless: true, proxy: proxyConfig });

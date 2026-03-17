@@ -13,7 +13,7 @@ import * as googleExtractor from '../extractors/google.js';
 import { humanScroll, randomDelay, warmup } from '../humanize.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
-import { handleError } from '../errors.js';
+import { handleError, BlockedError } from '../errors.js';
 
 export function registerSearch(program) {
   program
@@ -83,18 +83,7 @@ export function registerSearch(program) {
           const currentUrl = handle.page.url();
           if (googleExtractor.isBlocked(currentUrl)) {
             spinner.stop();
-            log.warn('Google detected automation and blocked the request');
-            log.dim('  Try: --proxy <proxy> or --warmup flag');
-            log.dim('  Or use a different engine: stealth search duckduckgo "..."');
-
-            if (opts.format === 'json') {
-              console.log(formatOutput({
-                engine, query, url: currentUrl,
-                blocked: true, results: [], count: 0,
-                timestamp: new Date().toISOString(),
-              }, 'json'));
-            }
-            return;
+            throw new BlockedError('Google', currentUrl);
           }
         }
         // --- Other engines: direct navigation ---

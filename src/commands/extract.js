@@ -9,7 +9,7 @@ import {
 } from '../browser.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
-import { handleError } from '../errors.js';
+import { handleError, ExtractionError } from '../errors.js';
 
 export function registerExtract(program) {
   program
@@ -130,6 +130,16 @@ export function registerExtract(program) {
               });
             },
             { selector: opts.selector, attr: opts.attr || null, all: !!opts.all },
+          );
+        }
+
+        // Warn when custom selector matched nothing
+        if (opts.selector && opts.selector !== 'body' &&
+            (result === null || result === undefined ||
+             (Array.isArray(result) && result.length === 0))) {
+          throw new ExtractionError(
+            `No elements found matching "${opts.selector}"`,
+            { hint: `Check the CSS selector. Try: stealth browse <url> -f snapshot` },
           );
         }
 

@@ -14,6 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import { ProfileError } from './errors.js';
 
 const PROFILES_DIR = path.join(os.homedir(), '.stealth', 'profiles');
 
@@ -148,7 +149,7 @@ export function createProfile(name, opts = {}) {
   const filePath = profilePath(name);
 
   if (fs.existsSync(filePath)) {
-    throw new Error(`Profile "${name}" already exists. Use --force to overwrite.`);
+    throw new ProfileError(`Profile "${name}" already exists. Use --force to overwrite.`);
   }
 
   let fingerprint;
@@ -156,7 +157,7 @@ export function createProfile(name, opts = {}) {
   if (opts.preset) {
     fingerprint = FINGERPRINT_PRESETS[opts.preset];
     if (!fingerprint) {
-      throw new Error(`Unknown preset "${opts.preset}". Available: ${Object.keys(FINGERPRINT_PRESETS).join(', ')}`);
+      throw new ProfileError(`Unknown preset "${opts.preset}". Available: ${Object.keys(FINGERPRINT_PRESETS).join(', ')}`, { hint: 'Run: stealth profile presets' });
     }
     fingerprint = { ...fingerprint }; // Clone
   } else if (opts.random || !opts.locale) {
@@ -193,7 +194,7 @@ export function loadProfile(name) {
   const filePath = profilePath(name);
 
   if (!fs.existsSync(filePath)) {
-    throw new Error(`Profile "${name}" not found. Create with: stealth profile create ${name}`);
+    throw new ProfileError(`Profile "${name}" not found`, { hint: `Create with: stealth profile create ${name}` });
   }
 
   return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
@@ -286,7 +287,7 @@ export function listProfiles() {
 export function deleteProfile(name) {
   const filePath = profilePath(name);
   if (!fs.existsSync(filePath)) {
-    throw new Error(`Profile "${name}" not found`);
+    throw new ProfileError(`Profile "${name}" not found`);
   }
   fs.unlinkSync(filePath);
 }
