@@ -64,10 +64,29 @@ describe('resolveOpts', () => {
     expect(opts.retries).toBe(3);
   });
 
+  it('should coerce all numeric CLI fields from strings', () => {
+    const opts = resolveOpts({
+      timeout: '5000',
+      delay: '2000',
+      wait: '3000',
+      depth: '3',
+      limit: '50',
+      width: '1920',
+      height: '1080',
+    });
+    expect(opts.timeout).toBe(5000);
+    expect(opts.delay).toBe(2000);
+    expect(opts.wait).toBe(3000);
+    expect(opts.depth).toBe(3);
+    expect(opts.limit).toBe(50);
+    expect(opts.width).toBe(1920);
+    expect(opts.height).toBe(1080);
+  });
+
   it('should pass through unknown CLI opts untouched', () => {
-    const opts = resolveOpts({ output: 'file.json', depth: '3', warmup: true });
+    const opts = resolveOpts({ output: 'file.json', warmup: true, selector: '.price' });
     expect(opts.output).toBe('file.json');
-    expect(opts.depth).toBe('3');
     expect(opts.warmup).toBe(true);
+    expect(opts.selector).toBe('.price');
   });
 });

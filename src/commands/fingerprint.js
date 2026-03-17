@@ -21,7 +21,7 @@ export function registerFingerprint(program) {
     .option('--no-headless', 'Show browser window')
     .action(async (opts) => {
       opts = resolveOpts(opts);
-      const compareCount = parseInt(opts.compare);
+      const compareCount = opts.compare;
 
       if (compareCount > 1) {
         await compareFingerprints(compareCount, opts);

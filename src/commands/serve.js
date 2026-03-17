@@ -21,7 +21,7 @@ export function registerServe(program) {
     .option('--token <token>', 'API token for authentication (auto-generated if not set)')
     .option('--no-auth', 'Disable authentication (only recommended on localhost)')
     .action(async (opts) => {
-      const port = parseInt(opts.port);
+      const port = opts.port;
       const host = opts.host;
       const apiToken = opts.token || crypto.randomBytes(24).toString('hex');
 

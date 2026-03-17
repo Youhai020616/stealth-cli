@@ -53,8 +53,8 @@ export function registerPdf(program) {
         }
 
         spinner.text = `Navigating to ${url}...`;
-        await navigate(handle, url, { retries: parseInt(opts.retries) });
-        await waitForReady(handle.page, { timeout: parseInt(opts.wait) });
+        await navigate(handle, url, { retries: opts.retries });
+        await waitForReady(handle.page, { timeout: opts.wait });
 
         spinner.text = 'Generating PDF...';
 

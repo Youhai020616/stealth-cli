@@ -72,7 +72,7 @@ export function registerSearch(program) {
           if (!success) {
             // Fallback: direct URL navigation
             spinner.text = 'Fallback: direct navigation...';
-            await navigate(handle, url, { retries: parseInt(opts.retries) });
+            await navigate(handle, url, { retries: opts.retries });
           }
 
           await waitForReady(handle.page, { timeout: 5000 });
@@ -102,7 +102,7 @@ export function registerSearch(program) {
           spinner.text = `Navigating to ${engine}...`;
           await navigate(handle, url, {
             humanize: opts.humanize,
-            retries: parseInt(opts.retries),
+            retries: opts.retries,
           });
 
           if (!handle.isDaemon) {
@@ -123,7 +123,7 @@ export function registerSearch(program) {
           let alsoAsk = [];
 
           if (!handle.isDaemon) {
-            results = await extractor.extractResults(handle.page, parseInt(opts.num));
+            results = await extractor.extractResults(handle.page, opts.num);
 
             // Google "People also ask"
             if (isGoogle && opts.alsoAsk) {

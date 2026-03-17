@@ -40,8 +40,8 @@ export function registerScreenshot(program) {
           profile: opts.profile,
           session: opts.session,
           viewport: {
-            width: parseInt(opts.width),
-            height: parseInt(opts.height),
+            width: opts.width,
+            height: opts.height,
           },
         });
 
@@ -54,11 +54,11 @@ export function registerScreenshot(program) {
         spinner.text = `Navigating to ${url}...`;
         await navigate(handle, url, {
           humanize: opts.humanize,
-          retries: parseInt(opts.retries),
+          retries: opts.retries,
         });
 
         if (!handle.isDaemon) {
-          await waitForReady(handle.page, { timeout: parseInt(opts.wait) });
+          await waitForReady(handle.page, { timeout: opts.wait });
         }
 
         spinner.text = 'Taking screenshot...';
@@ -75,7 +75,7 @@ export function registerScreenshot(program) {
 
           if (opts.output.endsWith('.jpg') || opts.output.endsWith('.jpeg')) {
             screenshotOpts.type = 'jpeg';
-            if (opts.quality) screenshotOpts.quality = parseInt(opts.quality);
+            if (opts.quality) screenshotOpts.quality = opts.quality;
           } else {
             screenshotOpts.type = 'png';
           }

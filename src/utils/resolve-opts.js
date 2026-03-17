@@ -45,9 +45,13 @@ export function resolveOpts(cliOpts = {}) {
     }
   }
 
-  // Ensure retries is a number (Commander passes strings)
-  if (typeof merged.retries === 'string') {
-    merged.retries = parseInt(merged.retries, 10);
+  // Coerce numeric fields (Commander passes CLI values as strings)
+  const NUMERIC_KEYS = ['retries', 'timeout', 'delay', 'viewportWidth', 'viewportHeight', 'wait', 'depth', 'limit', 'interval', 'count', 'port', 'num', 'width', 'height'];
+  for (const key of NUMERIC_KEYS) {
+    if (typeof merged[key] === 'string') {
+      const n = parseInt(merged[key], 10);
+      if (!isNaN(n)) merged[key] = n;
+    }
   }
 
   return merged;

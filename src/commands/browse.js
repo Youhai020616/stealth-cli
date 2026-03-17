@@ -53,11 +53,11 @@ export function registerBrowse(program) {
         spinner.text = `Navigating to ${url}...`;
         await navigate(handle, url, {
           humanize: opts.humanize,
-          retries: parseInt(opts.retries),
+          retries: opts.retries,
         });
 
         if (!handle.isDaemon) {
-          await waitForReady(handle.page, { timeout: parseInt(opts.wait) });
+          await waitForReady(handle.page, { timeout: opts.wait });
         }
 
         spinner.stop();

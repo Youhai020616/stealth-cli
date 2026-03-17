@@ -28,8 +28,8 @@ export function registerMonitor(program) {
     .option('--no-headless', 'Show browser window')
     .action(async (url, opts) => {
       opts = resolveOpts(opts);
-      const interval = parseInt(opts.interval) * 1000;
-      const maxChecks = parseInt(opts.count);
+      const interval = opts.interval * 1000;
+      const maxChecks = opts.count;
       const selector = opts.selector || 'body';
 
       log.info(`Monitoring ${url}`);

@@ -84,10 +84,10 @@ export function registerBatch(program) {
 
           try {
             if (handle.isDaemon) {
-              await navigate(handle, url, { retries: parseInt(opts.retries) });
+              await navigate(handle, url, { retries: opts.retries });
             } else {
               await navigateWithRetry(handle.page, url, {
-                maxRetries: parseInt(opts.retries),
+                maxRetries: opts.retries,
               });
               await waitForReady(handle.page, { timeout: 3000 });
             }
@@ -162,7 +162,7 @@ export function registerBatch(program) {
 
           // Delay between URLs
           if (i < urls.length - 1) {
-            const delay = parseInt(opts.delay);
+            const delay = opts.delay;
             await randomDelay(delay * 0.8, delay * 1.2);
           }
         }

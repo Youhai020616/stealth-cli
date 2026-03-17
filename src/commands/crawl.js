@@ -35,10 +35,10 @@ export function registerCrawl(program) {
       const spinner = ora('Launching stealth browser...').start();
       let handle;
 
-      const maxDepth = parseInt(opts.depth);
-      const maxPages = parseInt(opts.limit);
-      const delay = parseInt(opts.delay);
-      const maxRetries = parseInt(opts.retries);
+      const maxDepth = opts.depth;
+      const maxPages = opts.limit;
+      const delay = opts.delay;
+      const maxRetries = opts.retries;
       const includeRegex = opts.include ? new RegExp(opts.include) : null;
       const excludeRegex = opts.exclude ? new RegExp(opts.exclude) : null;
 
