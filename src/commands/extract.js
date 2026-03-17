@@ -9,6 +9,7 @@ import {
 } from '../browser.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+import { handleError } from '../errors.js';
 
 export function registerExtract(program) {
   program
@@ -146,8 +147,7 @@ export function registerExtract(program) {
         log.success(`Extracted from: ${currentUrl}`);
       } catch (err) {
         spinner.stop();
-        log.error(`Extract failed: ${err.message}`);
-        process.exit(1);
+        handleError(err, { log });
       } finally {
         if (handle) await closeBrowser(handle);
       }

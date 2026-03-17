@@ -42,7 +42,7 @@ export class NavigationError extends StealthError {
   constructor(url, cause) {
     const msg = `Failed to navigate to ${url}`;
     let hint = 'Check the URL and your network connection';
-    if (cause?.message?.includes('timeout')) {
+    if (cause?.message?.toLowerCase().includes('timeout')) {
       hint = 'Page load timed out. Try --wait <ms> or --retries <n>';
     } else if (cause?.message?.includes('net::ERR_')) {
       hint = 'Network error. Check DNS, proxy, or firewall';
@@ -103,20 +103,31 @@ export class BlockedError extends StealthError {
 
 /**
  * Format and print error with hint, then exit
+ *
+ * @param {Error} err - The error to handle
+ * @param {object} [opts]
+ * @param {object} [opts.log] - Logger (default: console with stderr)
+ * @param {boolean} [opts.exit=true] - Whether to call process.exit
  */
-export function handleError(err) {
-  const { log } = loadOutput();
+export function handleError(err, opts = {}) {
+  const { exit = true } = opts;
+
+  // Use provided log or fallback to stderr console
+  const log = opts.log || {
+    error: (msg) => console.error(`\x1b[31m✖\x1b[0m ${msg}`),
+    dim: (msg) => console.error(`\x1b[2m${msg}\x1b[0m`),
+  };
 
   if (err instanceof StealthError) {
     log.error(err.message);
     if (err.hint) log.dim(`  Hint: ${err.hint}`);
-    process.exit(err.code);
+    if (exit) process.exit(err.code);
+    return err.code;
   }
 
-  // Unknown error
+  // Unknown error — detect common patterns and add helpful hints
   log.error(err.message || String(err));
 
-  // Common error patterns → helpful hints
   const msg = err.message || '';
   if (msg.includes('ECONNREFUSED')) {
     log.dim('  Hint: Connection refused. Is the target server running?');
@@ -124,13 +135,10 @@ export function handleError(err) {
     log.dim('  Hint: DNS lookup failed. Check the URL');
   } else if (msg.includes('camoufox')) {
     log.dim('  Hint: Try: npx camoufox-js fetch');
+  } else if (msg.includes('timeout') || msg.includes('Timeout')) {
+    log.dim('  Hint: Try increasing --retries or --wait');
   }
 
-  process.exit(1);
-}
-
-// Lazy import to avoid circular dependency
-function loadOutput() {
-  // Use dynamic require-like pattern
-  return { log: console };
+  if (exit) process.exit(1);
+  return 1;
 }

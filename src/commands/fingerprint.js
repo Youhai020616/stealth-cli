@@ -7,6 +7,7 @@ import chalk from 'chalk';
 import { launchBrowser, closeBrowser, navigate, evaluate, waitForReady } from '../browser.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+import { handleError } from '../errors.js';
 
 export function registerFingerprint(program) {
   program
@@ -137,8 +138,7 @@ async function showFingerprint(opts) {
     console.log();
   } catch (err) {
     spinner.stop();
-    log.error(`Fingerprint check failed: ${err.message}`);
-    process.exit(1);
+    handleError(err, { log });
   } finally {
     if (handle) await closeBrowser(handle);
   }
@@ -241,8 +241,7 @@ async function runDetectionTests(opts) {
     }
   } catch (err) {
     spinner.stop();
-    log.error(`Detection tests failed: ${err.message}`);
-    process.exit(1);
+    handleError(err, { log });
   } finally {
     if (handle) await closeBrowser(handle);
   }

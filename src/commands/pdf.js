@@ -6,6 +6,7 @@ import ora from 'ora';
 import { launchBrowser, closeBrowser, navigate, waitForReady } from '../browser.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+import { handleError } from '../errors.js';
 
 export function registerPdf(program) {
   program
@@ -102,8 +103,7 @@ export function registerPdf(program) {
         log.dim(`  Format: ${opts.format}${opts.landscape ? ' landscape' : ''}`);
       } catch (err) {
         spinner.stop();
-        log.error(`PDF failed: ${err.message}`);
-        process.exit(1);
+        handleError(err, { log });
       } finally {
         if (handle) await closeBrowser(handle);
       }

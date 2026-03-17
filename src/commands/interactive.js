@@ -13,6 +13,7 @@ import { expandMacro, getSupportedEngines } from '../macros.js';
 import { humanClick, humanType, humanScroll, randomDelay } from '../humanize.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+import { handleError } from '../errors.js';
 
 const HELP_TEXT = `
 ${chalk.bold('Navigation:')}
@@ -278,9 +279,8 @@ export function registerInteractive(program) {
         });
       } catch (err) {
         spinner.stop();
-        log.error(`Failed to start: ${err.message}`);
         if (handle) await closeBrowser(handle);
-        process.exit(1);
+        handleError(err, { log });
       }
     });
 }

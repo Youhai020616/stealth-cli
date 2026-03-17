@@ -13,6 +13,7 @@ import * as googleExtractor from '../extractors/google.js';
 import { humanScroll, randomDelay, warmup } from '../humanize.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+import { handleError } from '../errors.js';
 
 export function registerSearch(program) {
   program
@@ -155,8 +156,7 @@ export function registerSearch(program) {
         log.success(`Search complete: ${currentUrl}`);
       } catch (err) {
         spinner.stop();
-        log.error(`Search failed: ${err.message}`);
-        process.exit(1);
+        handleError(err, { log });
       } finally {
         if (handle) await closeBrowser(handle);
       }

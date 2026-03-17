@@ -8,6 +8,7 @@ import { launchBrowser, closeBrowser, navigate, evaluate, waitForReady } from '.
 import { randomDelay } from '../humanize.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+import { handleError } from '../errors.js';
 
 export function registerMonitor(program) {
   program
@@ -153,8 +154,7 @@ export function registerMonitor(program) {
         console.log();
         log.success(`Monitoring complete: ${checkCount} checks, ${changeCount} changes`);
       } catch (err) {
-        log.error(`Monitor failed: ${err.message}`);
-        process.exit(1);
+        handleError(err, { log });
       } finally {
         if (handle) await closeBrowser(handle);
       }

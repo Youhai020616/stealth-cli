@@ -6,6 +6,7 @@ import ora from 'ora';
 import { launchBrowser, closeBrowser, navigate, takeScreenshot, getUrl, waitForReady } from '../browser.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+import { handleError } from '../errors.js';
 
 export function registerScreenshot(program) {
   program
@@ -89,8 +90,7 @@ export function registerScreenshot(program) {
         log.dim(`  Size: ${opts.width}x${opts.height}${opts.full ? ' (full page)' : ''}`);
       } catch (err) {
         spinner.stop();
-        log.error(`Screenshot failed: ${err.message}`);
-        process.exit(1);
+        handleError(err, { log });
       } finally {
         if (handle) await closeBrowser(handle);
       }

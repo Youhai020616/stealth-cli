@@ -9,6 +9,7 @@ import {
 } from '../browser.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+import { handleError } from '../errors.js';
 
 export function registerBrowse(program) {
   program
@@ -94,8 +95,7 @@ export function registerBrowse(program) {
         log.success(`Done: ${currentUrl}`);
       } catch (err) {
         spinner.stop();
-        log.error(`Browse failed: ${err.message}`);
-        process.exit(1);
+        handleError(err, { log });
       } finally {
         if (handle) await closeBrowser(handle);
       }

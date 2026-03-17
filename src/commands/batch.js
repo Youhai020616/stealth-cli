@@ -12,6 +12,7 @@ import { navigateWithRetry } from '../retry.js';
 import { randomDelay } from '../humanize.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+import { handleError } from '../errors.js';
 
 export function registerBatch(program) {
   program
@@ -172,9 +173,8 @@ export function registerBatch(program) {
         log.success(`Batch complete: ${success} succeeded, ${failed} failed, ${urls.length} total`);
       } catch (err) {
         spinner.stop();
-        log.error(`Batch failed: ${err.message}`);
         log.dim(`  Completed: ${success}/${urls.length}`);
-        process.exit(1);
+        handleError(err, { log });
       } finally {
         if (handle) await closeBrowser(handle);
       }
