@@ -23,8 +23,11 @@ src/
   retry.js               — Retry with exponential backoff
   macros.js              — Search engine URL templates
   output.js              — Output formatting (text/json/jsonl/markdown) + log helpers
-  errors.js              — Error hierarchy with exit codes
+  errors.js              — Error hierarchy with exit codes (used by all commands via handleError)
   mcp-server.js          — MCP server (stdio JSON-RPC) for AI agents
+  utils/
+    browser-factory.js   — Shared browser bootstrap (getHostOS, createBrowser, TEXT_EXTRACT_SCRIPT)
+    resolve-opts.js      — Merge global config + CLI opts (used by all core commands)
   extractors/
     index.js             — Extractor registry (by engine name or URL)
     base.js              — Generic fallback extractor

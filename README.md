@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D18-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-90%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-124%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -384,9 +384,9 @@ Available on all core commands:
 ```
 Version:     0.5.1
 Commands:    16
-Tests:       90 passing
-Source:      5,800+ lines
-Files:       47
+Tests:       124 passing
+Source:      6,000+ lines
+Files:       50
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)
