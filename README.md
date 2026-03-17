@@ -382,7 +382,7 @@ Available on all core commands:
 ## Project Stats
 
 ```
-Version:     0.5.1
+Version:     0.6.0
 Commands:    16
 Tests:       151 passing
 Source:      6,000+ lines

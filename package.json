@@ -1,6 +1,6 @@
 {
   "name": "stealth-cli",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Anti-detection browser CLI powered by Camoufox. Browse, search, scrape, and crawl the web with C++ level fingerprint spoofing.",
   "type": "module",
   "bin": {
