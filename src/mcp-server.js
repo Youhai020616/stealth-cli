@@ -21,6 +21,10 @@
 import { launchOptions } from 'camoufox-js';
 import { firefox } from 'playwright-core';
 import os from 'os';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const { version: PKG_VERSION } = require('../package.json');
 
 // --- MCP Protocol Implementation (stdio JSON-RPC) ---
 
@@ -284,7 +288,7 @@ class McpServer {
             result = {
               protocolVersion: '2024-11-05',
               capabilities: { tools: {} },
-              serverInfo: { name: 'stealth-cli', version: '0.4.0' },
+              serverInfo: { name: 'stealth-cli', version: PKG_VERSION },
             };
             break;
 

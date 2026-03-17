@@ -5,6 +5,11 @@
  */
 
 import { program } from 'commander';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const { version } = require('../package.json');
+
 import { registerBrowse } from '../src/commands/browse.js';
 import { registerScreenshot } from '../src/commands/screenshot.js';
 import { registerSearch } from '../src/commands/search.js';
@@ -25,7 +30,7 @@ import { registerConfig } from '../src/commands/config.js';
 program
   .name('stealth')
   .description('🦊 Anti-detection browser CLI powered by Camoufox')
-  .version('0.4.0');
+  .version(version);
 
 // Core commands
 registerBrowse(program);
