@@ -161,8 +161,7 @@ export function reportProxy(proxyUrl, success, latencyMs = null) {
  * Test a proxy by making a request
  */
 export async function testProxy(proxyUrl) {
-  const { launchOptions } = await import('camoufox-js');
-  const { firefox } = await import('playwright-core');
+  const { createBrowser } = await import('./utils/browser-factory.js');
 
   const start = Date.now();
   let browser;
@@ -181,12 +180,7 @@ export async function testProxy(proxyUrl) {
       throw new Error(`Invalid proxy URL: ${proxyUrl}`);
     }
 
-    const options = await launchOptions({
-      headless: true,
-      proxy: proxyConfig,
-    });
-
-    browser = await firefox.launch(options);
+    browser = await createBrowser({ headless: true, proxy: proxyConfig });
     const context = await browser.newContext();
     const page = await context.newPage();
 
