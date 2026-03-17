@@ -9,12 +9,13 @@
 import { withRetry, navigateWithRetry } from './retry.js';
 import { randomDelay, postNavigationBehavior } from './humanize.js';
 import { isDaemonRunning } from './daemon.js';
-import { daemonNavigate, daemonText, daemonScreenshot, daemonRequest } from './client.js';
+import { daemonNavigate, daemonRequest } from './client.js';
 import { loadProfile, touchProfile, saveCookiesToProfile, loadCookiesFromProfile } from './profiles.js';
 import { restoreSession, captureSession } from './session.js';
-import { getNextProxy, getRandomProxy, reportProxy } from './proxy-pool.js';
-import { getHostOS, createBrowser, TEXT_EXTRACT_SCRIPT } from './utils/browser-factory.js';
+import { getNextProxy } from './proxy-pool.js';
+import { getHostOS, createBrowser, extractPageText } from './utils/browser-factory.js';
 import { log } from './output.js';
+import { BrowserLaunchError, NavigationError } from './errors.js';
 
 /**
  * Build proxy configuration
@@ -106,11 +107,16 @@ export async function launchBrowser(opts = {}) {
   const hostOS = profileData?.fingerprint?.os || getHostOS();
   const proxy = buildProxy(proxyStr);
 
-  const browser = await createBrowser({
-    headless,
-    os: hostOS,
-    proxy: proxy || undefined,
-  });
+  let browser;
+  try {
+    browser = await createBrowser({
+      headless,
+      os: hostOS,
+      proxy: proxy || undefined,
+    });
+  } catch (err) {
+    throw new BrowserLaunchError(err.message, { cause: err });
+  }
 
   const contextOptions = {
     viewport,
@@ -193,26 +199,31 @@ export async function closeBrowser(handle) {
 export async function navigate(handle, url, opts = {}) {
   const { timeout = 30000, waitUntil = 'domcontentloaded', humanize = false, retries = 2 } = opts;
 
-  if (handle.isDaemon) {
-    const result = await withRetry(
-      async () => {
-        const res = await daemonNavigate(url, { timeout, waitUntil });
-        if (!res?.ok) throw new Error(res?.error || 'Daemon navigation failed');
-        return res.url;
-      },
-      { maxRetries: retries, label: `navigate(daemon)` },
-    );
-    return result;
+  try {
+    if (handle.isDaemon) {
+      const result = await withRetry(
+        async () => {
+          const res = await daemonNavigate(url, { timeout, waitUntil });
+          if (!res?.ok) throw new Error(res?.error || 'Daemon navigation failed');
+          return res.url;
+        },
+        { maxRetries: retries, label: `navigate(daemon)` },
+      );
+      return result;
+    }
+
+    const finalUrl = await navigateWithRetry(handle.page, url, { timeout, waitUntil, maxRetries: retries });
+
+    // Human behavior after navigation
+    if (humanize) {
+      await postNavigationBehavior(handle.page);
+    }
+
+    return finalUrl;
+  } catch (err) {
+    if (err instanceof NavigationError) throw err;
+    throw new NavigationError(url, err);
   }
-
-  const finalUrl = await navigateWithRetry(handle.page, url, { timeout, waitUntil, maxRetries: retries });
-
-  // Human behavior after navigation
-  if (humanize) {
-    await postNavigationBehavior(handle.page);
-  }
-
-  return finalUrl;
 }
 
 /**
@@ -261,7 +272,7 @@ export async function getTextContent(handle) {
     return res?.text || '';
   }
 
-  return handle.page.evaluate(TEXT_EXTRACT_SCRIPT);
+  return handle.page.evaluate(extractPageText);
 }
 
 /**

@@ -19,7 +19,7 @@
  */
 
 import { createRequire } from 'module';
-import { createBrowser, createContext, TEXT_EXTRACT_SCRIPT } from './utils/browser-factory.js';
+import { createBrowser, createContext, extractPageText } from './utils/browser-factory.js';
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require('../package.json');
@@ -160,7 +160,7 @@ class McpServer {
           return text(`URL: ${page.url()}\n\n${snapshot}`);
         }
 
-        const content = await page.evaluate(TEXT_EXTRACT_SCRIPT);
+        const content = await page.evaluate(extractPageText);
         const title = await page.title().catch(() => '');
         return text(`Title: ${title}\nURL: ${page.url()}\n\n${content.slice(0, 15000)}`);
       }

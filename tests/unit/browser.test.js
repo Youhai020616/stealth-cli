@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../../src/utils/browser-factory.js', () => ({
   getHostOS: () => 'macos',
   createBrowser: vi.fn(),
-  TEXT_EXTRACT_SCRIPT: '(() => "mocked text")()',
+  extractPageText: () => 'mocked text',
 }));
 
 vi.mock('../../src/daemon.js', () => ({
@@ -56,6 +56,21 @@ import { restoreSession } from '../../src/session.js';
 import { getNextProxy } from '../../src/proxy-pool.js';
 import { daemonNavigate, daemonRequest } from '../../src/client.js';
 
+// Helper: create mock browser/context/page and wire up createBrowser
+function setupMockBrowser() {
+  const mockPage = { goto: vi.fn() };
+  const mockContext = {
+    newPage: vi.fn().mockResolvedValue(mockPage),
+    close: vi.fn(),
+  };
+  const mockBrowser = {
+    newContext: vi.fn().mockResolvedValue(mockContext),
+    close: vi.fn(),
+  };
+  createBrowser.mockResolvedValue(mockBrowser);
+  return { mockBrowser, mockContext, mockPage };
+}
+
 describe('launchBrowser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -74,18 +89,7 @@ describe('launchBrowser', () => {
 
   it('should launch direct browser when daemon is NOT running', async () => {
     isDaemonRunning.mockReturnValue(false);
-
-    // Mock createBrowser to return a fake browser
-    const mockPage = { goto: vi.fn() };
-    const mockContext = {
-      newPage: vi.fn().mockResolvedValue(mockPage),
-      close: vi.fn(),
-    };
-    const mockBrowser = {
-      newContext: vi.fn().mockResolvedValue(mockContext),
-      close: vi.fn(),
-    };
-    createBrowser.mockResolvedValue(mockBrowser);
+    const { mockBrowser, mockPage } = setupMockBrowser();
 
     const handle = await launchBrowser();
 
@@ -101,40 +105,19 @@ describe('launchBrowser', () => {
       fingerprint: { locale: 'ja-JP', timezone: 'Asia/Tokyo', viewport: { width: 1920, height: 1080 }, os: 'windows' },
       proxy: null,
     });
-
-    const mockPage = { goto: vi.fn() };
-    const mockContext = {
-      newPage: vi.fn().mockResolvedValue(mockPage),
-      close: vi.fn(),
-    };
-    const mockBrowser = {
-      newContext: vi.fn().mockResolvedValue(mockContext),
-      close: vi.fn(),
-    };
-    createBrowser.mockResolvedValue(mockBrowser);
+    setupMockBrowser();
 
     const handle = await launchBrowser({ profile: 'jp-desktop' });
 
     expect(handle.isDaemon).toBe(false);
     expect(loadProfile).toHaveBeenCalledWith('jp-desktop');
     expect(touchProfile).toHaveBeenCalledWith('jp-desktop');
-    // Should use profile's OS
     expect(createBrowser).toHaveBeenCalledWith(expect.objectContaining({ os: 'windows' }));
   });
 
   it('should skip daemon when proxy is specified', async () => {
     isDaemonRunning.mockReturnValue(true);
-
-    const mockPage = { goto: vi.fn() };
-    const mockContext = {
-      newPage: vi.fn().mockResolvedValue(mockPage),
-      close: vi.fn(),
-    };
-    const mockBrowser = {
-      newContext: vi.fn().mockResolvedValue(mockContext),
-      close: vi.fn(),
-    };
-    createBrowser.mockResolvedValue(mockBrowser);
+    setupMockBrowser();
 
     const handle = await launchBrowser({ proxy: 'http://proxy:8080' });
 
@@ -145,17 +128,7 @@ describe('launchBrowser', () => {
   it('should skip daemon when session is specified', async () => {
     isDaemonRunning.mockReturnValue(true);
     restoreSession.mockResolvedValue({ lastUrl: null, history: [] });
-
-    const mockPage = { goto: vi.fn() };
-    const mockContext = {
-      newPage: vi.fn().mockResolvedValue(mockPage),
-      close: vi.fn(),
-    };
-    const mockBrowser = {
-      newContext: vi.fn().mockResolvedValue(mockContext),
-      close: vi.fn(),
-    };
-    createBrowser.mockResolvedValue(mockBrowser);
+    const { mockContext } = setupMockBrowser();
 
     const handle = await launchBrowser({ session: 'my-session' });
 
@@ -166,17 +139,7 @@ describe('launchBrowser', () => {
   it('should use proxy pool rotation when proxyRotate is true', async () => {
     isDaemonRunning.mockReturnValue(false);
     getNextProxy.mockReturnValue('http://rotated-proxy:9090');
-
-    const mockPage = { goto: vi.fn() };
-    const mockContext = {
-      newPage: vi.fn().mockResolvedValue(mockPage),
-      close: vi.fn(),
-    };
-    const mockBrowser = {
-      newContext: vi.fn().mockResolvedValue(mockContext),
-      close: vi.fn(),
-    };
-    createBrowser.mockResolvedValue(mockBrowser);
+    setupMockBrowser();
 
     const handle = await launchBrowser({ proxyRotate: true });
 
@@ -187,19 +150,8 @@ describe('launchBrowser', () => {
   it('should warn but not crash when profile load fails', async () => {
     isDaemonRunning.mockReturnValue(false);
     loadProfile.mockImplementation(() => { throw new Error('Profile not found'); });
+    const { mockPage } = setupMockBrowser();
 
-    const mockPage = { goto: vi.fn() };
-    const mockContext = {
-      newPage: vi.fn().mockResolvedValue(mockPage),
-      close: vi.fn(),
-    };
-    const mockBrowser = {
-      newContext: vi.fn().mockResolvedValue(mockContext),
-      close: vi.fn(),
-    };
-    createBrowser.mockResolvedValue(mockBrowser);
-
-    // Should not throw
     const handle = await launchBrowser({ profile: 'nonexistent' });
     expect(handle.isDaemon).toBe(false);
     expect(handle.page).toBe(mockPage);

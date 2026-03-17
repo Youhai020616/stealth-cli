@@ -14,7 +14,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { createBrowser, createContext, TEXT_EXTRACT_SCRIPT } from './utils/browser-factory.js';
+import { createBrowser, createContext, extractPageText } from './utils/browser-factory.js';
 
 const STEALTH_DIR = path.join(os.homedir(), '.stealth');
 const SOCKET_PATH = path.join(STEALTH_DIR, 'daemon.sock');
@@ -173,7 +173,7 @@ export async function startDaemon(opts = {}) {
       if (route === '/text') {
         const { key = 'default' } = body;
         const ctx = await getOrCreateContext(key);
-        const text = await ctx.page.evaluate(TEXT_EXTRACT_SCRIPT);
+        const text = await ctx.page.evaluate(extractPageText);
         res.end(JSON.stringify({ ok: true, text, url: ctx.page.url() }));
         return;
       }

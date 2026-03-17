@@ -36,6 +36,9 @@ export async function createBrowser(opts = {}) {
   const options = await launchOptions({
     headless,
     os: targetOS || getHostOS(),
+    // Camoufox's `humanize` controls low-level fingerprint randomization (canvas noise, etc.)
+    // This is NOT the same as stealth-cli's --humanize flag (which controls mouse/scroll/type simulation).
+    // Always enabled for anti-detection effectiveness.
     humanize: true,
     enable_cache: true,
     proxy: proxy || undefined,
@@ -70,15 +73,14 @@ export async function createContext(browser, opts = {}) {
 }
 
 /**
- * JavaScript snippet to extract visible text from a page.
- * Evaluate this in page.evaluate() — cannot reference Node.js scope.
+ * Extract visible text from a page.
+ * Pass directly to page.evaluate() — must not reference Node.js scope.
+ * Using a function (not a string) avoids eval-injection risks.
  */
-export const TEXT_EXTRACT_SCRIPT = `
-(() => {
+export function extractPageText() {
   const body = document.body;
   if (!body) return '';
   const clone = body.cloneNode(true);
   clone.querySelectorAll('script, style, noscript').forEach(el => el.remove());
   return clone.innerText || clone.textContent || '';
-})()
-`;
+}

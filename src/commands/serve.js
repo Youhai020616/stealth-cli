@@ -8,7 +8,7 @@
 import http from 'http';
 import crypto from 'crypto';
 import { log } from '../output.js';
-import { createBrowser, createContext, TEXT_EXTRACT_SCRIPT } from '../utils/browser-factory.js';
+import { createBrowser, createContext, extractPageText } from '../utils/browser-factory.js';
 
 export function registerServe(program) {
   program
@@ -21,7 +21,7 @@ export function registerServe(program) {
     .option('--token <token>', 'API token for authentication (auto-generated if not set)')
     .option('--no-auth', 'Disable authentication (only recommended on localhost)')
     .action(async (opts) => {
-      const port = opts.port;
+      const port = parseInt(opts.port, 10);
       const host = opts.host;
       const apiToken = opts.token || crypto.randomBytes(24).toString('hex');
 
@@ -92,7 +92,6 @@ export function registerServe(program) {
 
         try {
           const body = method === 'POST' ? await parseBody(req) : {};
-          const query = Object.fromEntries(url.searchParams);
 
           // --- Health (no auth required) ---
           if (route === '/health') {
@@ -148,7 +147,7 @@ export function registerServe(program) {
               }
 
               case 'text': {
-                const text = await page.evaluate(TEXT_EXTRACT_SCRIPT);
+                const text = await page.evaluate(extractPageText);
                 return json(res, { ok: true, text, url: page.url() });
               }
 

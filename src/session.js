@@ -66,12 +66,12 @@ export async function captureSession(name, context, page, opts = {}) {
   // Save cookies
   try {
     session.cookies = await context.cookies();
-  } catch {}
+  } catch { /* context may be closed */ }
 
   // Save current URL
   try {
     session.lastUrl = page.url();
-  } catch {}
+  } catch { /* page may be closed */ }
 
   // Append to history
   if (session.lastUrl && session.lastUrl !== 'about:blank') {
@@ -113,7 +113,7 @@ export async function restoreSession(name, context) {
       if (validCookies.length > 0) {
         await context.addCookies(validCookies);
       }
-    } catch {}
+    } catch { /* cookies may have invalid format */ }
   }
 
   return {

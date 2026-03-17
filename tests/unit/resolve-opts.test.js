@@ -47,10 +47,24 @@ describe('resolveOpts', () => {
     expect(opts.locale).toBe('ja-JP');
   });
 
-  it('should not override CLI false with config true for headless', () => {
+  it('should not override CLI --no-headless (explicit false) with config true', () => {
     setConfigValue('headless', 'true');
+    // User passed --no-headless → Commander sets headless=false
     const opts = resolveOpts({ headless: false });
     expect(opts.headless).toBe(false);
+  });
+
+  it('should let global config headless=false win over Commander auto-default true', () => {
+    setConfigValue('headless', 'false');
+    // User did NOT pass --headless or --no-headless → Commander auto-sets headless=true
+    const opts = resolveOpts({ headless: true });
+    expect(opts.headless).toBe(false); // Global config wins
+  });
+
+  it('should use Commander auto-default when global config has no custom value', () => {
+    // No custom config set for headless (defaults to true)
+    const opts = resolveOpts({ headless: true });
+    expect(opts.headless).toBe(true); // Both agree, no conflict
   });
 
   it('should handle proxy from config', () => {
