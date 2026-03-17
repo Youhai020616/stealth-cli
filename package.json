@@ -1,19 +1,27 @@
 {
   "name": "stealth-cli",
-  "version": "0.5.0",
-  "description": "Anti-detection browser CLI powered by Camoufox",
+  "version": "0.5.1",
+  "description": "Anti-detection browser CLI powered by Camoufox. Browse, search, scrape, and crawl the web with C++ level fingerprint spoofing.",
   "type": "module",
   "bin": {
-    "stealth": "./bin/stealth.js"
+    "stealth": "bin/stealth.js"
   },
   "main": "src/index.js",
+  "files": [
+    "bin/",
+    "src/",
+    "skills/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node bin/stealth.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
     "test:e2e": "vitest run tests/e2e",
-    "postinstall": "npx camoufox-js fetch || true"
+    "postinstall": "npx camoufox-js fetch || true",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "browser",
@@ -22,9 +30,25 @@
     "camoufox",
     "stealth",
     "scraping",
-    "automation"
+    "automation",
+    "headless",
+    "fingerprint",
+    "web-scraping",
+    "anti-bot",
+    "cloudflare",
+    "playwright",
+    "firefox"
   ],
+  "author": "xyh",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "homepage": "",
+  "bugs": {
+    "url": ""
+  },
   "engines": {
     "node": ">=18"
   },
