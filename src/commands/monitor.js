@@ -7,6 +7,7 @@ import chalk from 'chalk';
 import { launchBrowser, closeBrowser, navigate, evaluate, waitForReady } from '../browser.js';
 import { randomDelay } from '../humanize.js';
 import { log } from '../output.js';
+import { resolveOpts } from '../utils/resolve-opts.js';
 
 export function registerMonitor(program) {
   program
@@ -25,6 +26,7 @@ export function registerMonitor(program) {
     .option('--proxy-rotate', 'Rotate proxy from pool')
     .option('--no-headless', 'Show browser window')
     .action(async (url, opts) => {
+      opts = resolveOpts(opts);
       const interval = parseInt(opts.interval) * 1000;
       const maxChecks = parseInt(opts.count);
       const selector = opts.selector || 'body';

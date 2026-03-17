@@ -12,6 +12,7 @@ import {
 import { expandMacro, getSupportedEngines } from '../macros.js';
 import { humanClick, humanType, humanScroll, randomDelay } from '../humanize.js';
 import { log } from '../output.js';
+import { resolveOpts } from '../utils/resolve-opts.js';
 
 const HELP_TEXT = `
 ${chalk.bold('Navigation:')}
@@ -53,6 +54,7 @@ export function registerInteractive(program) {
     .option('--no-headless', 'Show browser window')
     .option('--url <url>', 'Initial URL to open')
     .action(async (opts) => {
+      opts = resolveOpts(opts);
       const spinner = ora('Launching stealth browser...').start();
       let handle;
 

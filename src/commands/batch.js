@@ -11,6 +11,7 @@ import {
 import { navigateWithRetry } from '../retry.js';
 import { randomDelay } from '../humanize.js';
 import { formatOutput, log } from '../output.js';
+import { resolveOpts } from '../utils/resolve-opts.js';
 
 export function registerBatch(program) {
   program
@@ -30,6 +31,7 @@ export function registerBatch(program) {
     .option('--retries <n>', 'Max retries per URL', '2')
     .option('--skip-errors', 'Continue on errors instead of stopping')
     .action(async (file, opts) => {
+      opts = resolveOpts(opts);
       // Read URLs from file
       if (!fs.existsSync(file)) {
         log.error(`File not found: ${file}`);

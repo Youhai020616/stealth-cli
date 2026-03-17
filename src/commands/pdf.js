@@ -5,6 +5,7 @@
 import ora from 'ora';
 import { launchBrowser, closeBrowser, navigate, waitForReady } from '../browser.js';
 import { log } from '../output.js';
+import { resolveOpts } from '../utils/resolve-opts.js';
 
 export function registerPdf(program) {
   program
@@ -25,8 +26,9 @@ export function registerPdf(program) {
     .option('--cookies <file>', 'Load cookies from Netscape-format file')
     .option('--profile <name>', 'Use a browser profile')
     .option('--no-headless', 'Show browser window')
-    .option('--retries <n>', 'Max retries on failure', '2')
+    .option('--retries <n>', 'Max retries on failure')
     .action(async (url, opts) => {
+      opts = resolveOpts(opts);
       const spinner = ora('Launching stealth browser...').start();
       let handle;
 

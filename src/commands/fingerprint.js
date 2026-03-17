@@ -6,6 +6,7 @@ import ora from 'ora';
 import chalk from 'chalk';
 import { launchBrowser, closeBrowser, navigate, evaluate, waitForReady } from '../browser.js';
 import { log } from '../output.js';
+import { resolveOpts } from '../utils/resolve-opts.js';
 
 export function registerFingerprint(program) {
   program
@@ -18,6 +19,7 @@ export function registerFingerprint(program) {
     .option('--compare <n>', 'Launch N times and compare fingerprints for uniqueness', '1')
     .option('--no-headless', 'Show browser window')
     .action(async (opts) => {
+      opts = resolveOpts(opts);
       const compareCount = parseInt(opts.compare);
 
       if (compareCount > 1) {

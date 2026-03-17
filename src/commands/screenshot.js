@@ -5,6 +5,7 @@
 import ora from 'ora';
 import { launchBrowser, closeBrowser, navigate, takeScreenshot, getUrl, waitForReady } from '../browser.js';
 import { log } from '../output.js';
+import { resolveOpts } from '../utils/resolve-opts.js';
 
 export function registerScreenshot(program) {
   program
@@ -21,11 +22,12 @@ export function registerScreenshot(program) {
     .option('--no-headless', 'Show browser window')
     .option('--quality <n>', 'JPEG quality (1-100), only for .jpg output')
     .option('--humanize', 'Enable human behavior simulation')
-    .option('--retries <n>', 'Max retries on failure', '2')
+    .option('--retries <n>', 'Max retries on failure')
     .option('--profile <name>', 'Use a browser profile')
     .option('--session <name>', 'Use/restore a named session')
     .option('--proxy-rotate', 'Rotate proxy from pool')
     .action(async (url, opts) => {
+      opts = resolveOpts(opts);
       const spinner = ora('Launching stealth browser...').start();
       let handle;
 

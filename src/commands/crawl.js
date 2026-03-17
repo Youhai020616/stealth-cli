@@ -7,6 +7,7 @@ import { launchBrowser, closeBrowser, getTextContent, evaluate, waitForReady } f
 import { navigateWithRetry } from '../retry.js';
 import { randomDelay, humanScroll } from '../humanize.js';
 import { formatOutput, log } from '../output.js';
+import { resolveOpts } from '../utils/resolve-opts.js';
 
 export function registerCrawl(program) {
   program
@@ -25,10 +26,11 @@ export function registerCrawl(program) {
     .option('--include <pattern>', 'Only crawl URLs matching this pattern (regex)')
     .option('--exclude <pattern>', 'Skip URLs matching this pattern (regex)')
     .option('--humanize', 'Enable human behavior simulation')
-    .option('--retries <n>', 'Max retries per page', '2')
+    .option('--retries <n>', 'Max retries per page')
     .option('--profile <name>', 'Use a browser profile')
     .option('--proxy-rotate', 'Rotate proxy from pool')
     .action(async (startUrl, opts) => {
+      opts = resolveOpts(opts);
       const spinner = ora('Launching stealth browser...').start();
       let handle;
 

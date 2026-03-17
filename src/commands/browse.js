@@ -8,25 +8,27 @@ import {
   getTextContent, getTitle, getUrl, evaluate, waitForReady,
 } from '../browser.js';
 import { formatOutput, log } from '../output.js';
+import { resolveOpts } from '../utils/resolve-opts.js';
 
 export function registerBrowse(program) {
   program
     .command('browse')
     .description('Visit a URL and print page content')
     .argument('<url>', 'URL to visit')
-    .option('-f, --format <format>', 'Output format: text, json, markdown, snapshot', 'text')
+    .option('-f, --format <format>', 'Output format: text, json, markdown, snapshot')
     .option('-w, --wait <ms>', 'Wait time after page load (ms)', '2000')
     .option('--proxy <proxy>', 'Proxy server (http://user:pass@host:port)')
     .option('--cookies <file>', 'Load cookies from Netscape-format file')
     .option('--no-headless', 'Show browser window')
-    .option('--locale <locale>', 'Browser locale', 'en-US')
+    .option('--locale <locale>', 'Browser locale')
     .option('--user-agent', 'Print the browser user-agent')
     .option('--humanize', 'Enable human behavior simulation')
-    .option('--retries <n>', 'Max retries on failure', '2')
+    .option('--retries <n>', 'Max retries on failure')
     .option('--profile <name>', 'Use a browser profile')
     .option('--session <name>', 'Use/restore a named session')
     .option('--proxy-rotate', 'Rotate proxy from pool')
     .action(async (url, opts) => {
+      opts = resolveOpts(opts);
       const spinner = ora('Launching stealth browser...').start();
       let handle;
 

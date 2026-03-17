@@ -12,6 +12,7 @@ import { getExtractorByEngine } from '../extractors/index.js';
 import * as googleExtractor from '../extractors/google.js';
 import { humanScroll, randomDelay, warmup } from '../humanize.js';
 import { formatOutput, log } from '../output.js';
+import { resolveOpts } from '../utils/resolve-opts.js';
 
 export function registerSearch(program) {
   program
@@ -19,18 +20,19 @@ export function registerSearch(program) {
     .description('Search the web with anti-detection')
     .argument('<engine>', `Search engine: ${getSupportedEngines().join(', ')}`)
     .argument('<query>', 'Search query')
-    .option('-f, --format <format>', 'Output format: text, json, snapshot', 'text')
+    .option('-f, --format <format>', 'Output format: text, json, snapshot')
     .option('-n, --num <n>', 'Max results to extract', '10')
     .option('--proxy <proxy>', 'Proxy server')
     .option('--no-headless', 'Show browser window')
     .option('--humanize', 'Simulate human behavior (auto for Google)')
     .option('--warmup', 'Visit a random site before searching (helps bypass detection)')
-    .option('--retries <n>', 'Max retries on failure', '2')
+    .option('--retries <n>', 'Max retries on failure')
     .option('--also-ask', 'Include "People also ask" questions (Google only)')
     .option('--profile <name>', 'Use a browser profile')
     .option('--session <name>', 'Use/restore a named session')
     .option('--proxy-rotate', 'Rotate proxy from pool')
     .action(async (engine, query, opts) => {
+      opts = resolveOpts(opts);
       const url = expandMacro(engine, query);
 
       if (!url) {
