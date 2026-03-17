@@ -13,6 +13,12 @@
 
 ---
 
+## Demo
+
+<p align="center">
+  <img src="demo.gif" alt="stealth-cli demo" width="800" />
+</p>
+
 ## Why
 
 Headless Chrome gets fingerprinted. Playwright gets blocked. Stealth plugins become the fingerprint.

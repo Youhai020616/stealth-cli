@@ -3,6 +3,8 @@ node_modules/
 .DS_Store
 screenshot*.png
 screenshot*.jpg
+github.png
+demo-shot.png
 *.jsonl
 dist/
 .env
