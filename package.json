@@ -50,7 +50,7 @@
     "url": ""
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "camoufox-js": "^0.9.2",

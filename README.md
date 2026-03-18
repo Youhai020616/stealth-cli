@@ -6,7 +6,7 @@
     <a href="https://www.npmjs.com/package/stealth-cli"><img src="https://img.shields.io/npm/v/stealth-cli?color=blue" alt="npm version" /></a>
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
-    <img src="https://img.shields.io/badge/node-%3E%3D18-green" alt="Node" />
+    <img src="https://img.shields.io/badge/node-%3E%3D20-green" alt="Node" />
     <img src="https://img.shields.io/badge/tests-151%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
