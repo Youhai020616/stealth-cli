@@ -8,3 +8,4 @@ demo-shot.png
 *.jsonl
 dist/
 .env
+docs/
