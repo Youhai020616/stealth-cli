@@ -11,6 +11,10 @@
   </p>
 </div>
 
+<p align="center">
+  <img src="./demo.gif" alt="stealth-cli demo" width="720">
+</p>
+
 ---
 
 ## Why
@@ -20,6 +24,15 @@ Headless Chrome gets fingerprinted. Playwright gets blocked. Stealth plugins bec
 **stealth-cli** uses [Camoufox](https://camoufox.com) — a Firefox fork that patches fingerprint generation at the **C++ implementation level**. No JavaScript shims, no wrappers, no tells. The browser reports spoofed values natively.
 
 Wrap that in a developer-friendly CLI with 16 commands, and you get a tool that both humans and AI agents can use.
+
+### How it compares
+
+| Approach | Detection Risk | Why |
+|----------|:---:|------|
+| Puppeteer + stealth plugin | 🔴 High | JS-level patches are detectable; Chromium TLS fingerprint is a giveaway |
+| Playwright + custom args | 🟡 Medium | Better, but `navigator.webdriver` workarounds are fragile |
+| undetected-chromedriver | 🟡 Medium | Patches Chrome binary, but still Chromium-based fingerprint |
+| **stealth-cli (Camoufox)** | 🟢 Low | Firefox fork with C++ native spoofing; no JS shims to detect |
 
 ## Install
 
@@ -33,7 +46,7 @@ npm install -g stealth-cli
 <summary>Install from source</summary>
 
 ```bash
-git clone https://github.com/user/stealth-cli.git
+git clone https://github.com/Youhai020616/stealth-cli.git
 cd stealth-cli
 npm install        # Installs deps + downloads Camoufox browser
 npm link           # Makes 'stealth' command globally available
@@ -44,13 +57,35 @@ npm link           # Makes 'stealth' command globally available
 ## Quick Start
 
 ```bash
-stealth browse https://example.com                       # Visit a page
-stealth screenshot https://example.com -o page.png       # Screenshot
-stealth search google "best coffee beans" -f json        # Search Google
-stealth extract https://example.com --links              # Extract links
+stealth browse https://example.com                          # Visit a page
+stealth screenshot https://example.com -o page.png          # Screenshot
+stealth search google "best coffee beans" -f json           # Search Google
+stealth extract https://example.com --links                 # Extract links
 stealth crawl https://example.com -d 2 -l 50 -o out.jsonl  # Crawl
-stealth interactive --url https://example.com            # REPL mode
+stealth interactive --url https://example.com               # REPL mode
 ```
+
+## How Anti-Detection Works
+
+```
+stealth-cli (Node.js CLI)
+  └── camoufox-js (npm binding)
+       └── Camoufox (C++ Firefox fork)
+            └── Fingerprint spoofing at the native level
+```
+
+| Fingerprint Vector | Approach |
+|---|---|
+| `navigator.hardwareConcurrency` | Spoofed in C++ |
+| `navigator.webdriver` | Always `false` |
+| WebGL renderer / vendor | Spoofed in C++ |
+| AudioContext fingerprint | Spoofed in C++ |
+| Canvas fingerprint | Spoofed in C++ |
+| Screen geometry | Spoofed in C++ |
+| WebRTC leak | Built-in protection |
+| TLS fingerprint | Firefox native (not Chromium) |
+
+No JavaScript shims. No detectable wrappers. The browser natively reports spoofed values.
 
 ## Commands
 
@@ -107,7 +142,7 @@ stealth search youtube "tutorial" -f json                # Video metadata
 stealth search github "camoufox" -f json                 # Repo results
 ```
 
-**14 engines:** google, bing, duckduckgo, youtube, github, amazon, reddit, wikipedia, twitter, linkedin, tiktok, stackoverflow, npmjs, yelp
+**14 engines:** google · bing · duckduckgo · youtube · github · amazon · reddit · wikipedia · twitter · linkedin · tiktok · stackoverflow · npmjs · yelp
 
 ### Extract
 
@@ -204,6 +239,20 @@ stealth browse https://example.com --proxy-rotate    # Auto-rotate
 
 GeoIP: Camoufox auto-matches locale, timezone, and geolocation to proxy exit IP.
 
+### Humanize Mode
+
+Simulate human behavior patterns to avoid behavioral detection:
+
+```bash
+stealth browse https://example.com --humanize
+stealth search google "query" --humanize --warmup
+```
+
+- Gaussian-distributed delays between actions
+- Bézier-curve mouse movements
+- Variable typing speed
+- Random scroll patterns
+
 ### Global Configuration
 
 Set defaults so you don't repeat flags:
@@ -220,7 +269,7 @@ All core commands respect global config. CLI flags always override.
 
 ### Pipe-Friendly
 
-stdout = data, stderr = status:
+stdout = data, stderr = status. Compose with Unix tools:
 
 ```bash
 stealth browse https://api.example.com -f json | jq '.title'
@@ -233,6 +282,8 @@ stealth extract https://example.com --links -f json | jq '.data[].url'
 ## Integrations
 
 ### HTTP API Server
+
+Run stealth-cli as a service for programmatic access:
 
 ```bash
 stealth serve --port 9377
@@ -254,6 +305,8 @@ curl localhost:9377/tabs/tab-1/text -H 'Authorization: Bearer <token>'  # Get te
 
 ### MCP Server (Claude Desktop / Cursor)
 
+Add stealth browsing capabilities to your AI coding assistant:
+
 ```json
 {
   "mcpServers": {
@@ -269,6 +322,8 @@ curl localhost:9377/tabs/tab-1/text -H 'Authorization: Bearer <token>'  # Get te
 
 ### SDK (Library Mode)
 
+Use stealth-cli programmatically in your Node.js applications:
+
 ```javascript
 import { launchBrowser, closeBrowser, navigate, getTextContent } from 'stealth-cli';
 
@@ -279,28 +334,6 @@ await closeBrowser(handle);
 ```
 
 ---
-
-## How Anti-Detection Works
-
-```
-stealth-cli
-  └── camoufox-js (npm)
-       └── Camoufox (C++ Firefox fork)
-            └── Fingerprint spoofing at the native level
-```
-
-| Fingerprint Vector | Approach |
-|---|---|
-| `navigator.hardwareConcurrency` | Spoofed in C++ |
-| `navigator.webdriver` | Always `false` |
-| WebGL renderer / vendor | Spoofed in C++ |
-| AudioContext fingerprint | Spoofed in C++ |
-| Canvas fingerprint | Spoofed in C++ |
-| Screen geometry | Spoofed in C++ |
-| WebRTC leak | Built-in protection |
-| TLS fingerprint | Firefox native (not Chromium) |
-
-No JavaScript shims. No detectable wrappers. The browser natively reports spoofed values.
 
 ## Error Handling
 
@@ -338,7 +371,7 @@ Available on all core commands:
 ## Project Stats
 
 ```
-Version:     0.6.0
+Version:     0.6.1
 Commands:    16
 Tests:       151 passing (18 test files)
 Source:      5,900 lines (39 source files)
@@ -348,6 +381,22 @@ Engine:      Camoufox (C++ Firefox fork)
 License:     MIT
 ```
 
+## Contributing
+
+Contributions welcome! Some areas where help is appreciated:
+
+- **New extractors** — Add structured parsing for more search engines/sites
+- **Profile presets** — More realistic browser fingerprint configurations
+- **Bug reports** — Especially sites that still detect stealth-cli
+- **Documentation** — Usage guides, tutorials, examples
+
+Please open an issue to discuss larger changes before submitting a PR.
+
+## Acknowledgments
+
+- [Camoufox](https://camoufox.com) — The Firefox fork that makes this possible
+- [Playwright](https://playwright.dev) — Browser automation framework
+
 ## License
 
-MIT
+[MIT](./LICENSE)
