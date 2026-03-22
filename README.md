@@ -392,6 +392,26 @@ Contributions welcome! Some areas where help is appreciated:
 
 Please open an issue to discuss larger changes before submitting a PR.
 
+## Star History
+
+<a href="https://star-history.com/#Youhai020616/stealth-cli&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Youhai020616/stealth-cli&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Youhai020616/stealth-cli&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Youhai020616/stealth-cli&type=Date" />
+  </picture>
+</a>
+
+## 🔗 Ecosystem
+
+| Project | Description |
+|---------|-------------|
+| [AgentMind](https://github.com/Youhai020616/Agentmind) | Self-learning memory system for AI agents |
+| [stealth-x](https://github.com/Youhai020616/stealth-x) | Anti-detection X/Twitter automation (built on stealth-cli) |
+| [dy-cli](https://github.com/Youhai020616/douyin) | Douyin/TikTok CLI |
+| [xiaohongshu](https://github.com/Youhai020616/xiaohongshu) | Xiaohongshu automation |
+| [freepost](https://github.com/Youhai020616/freepost-saas) | AI social media management |
+
 ## Acknowledgments
 
 - [Camoufox](https://camoufox.com) — The Firefox fork that makes this possible
