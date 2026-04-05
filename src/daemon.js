@@ -10,15 +10,22 @@
  * PID:    ~/.stealth/daemon.pid
  */
 
-import http from 'http';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { createBrowser, createContext, extractPageText } from './utils/browser-factory.js';
+import http from "http";
+import fs from "fs";
+import path from "path";
+import os from "os";
+import {
+  createBrowser,
+  createContext,
+  extractPageText,
+} from "./utils/browser-factory.js";
+import { getExtractorByEngine } from "./extractors/index.js";
+import { buildA11yTree, clickByRef, typeByRef, hoverByRef } from "./a11y.js";
+import * as googleExtractor from "./extractors/google.js";
 
-const STEALTH_DIR = path.join(os.homedir(), '.stealth');
-const SOCKET_PATH = path.join(STEALTH_DIR, 'daemon.sock');
-const PID_PATH = path.join(STEALTH_DIR, 'daemon.pid');
+const STEALTH_DIR = path.join(os.homedir(), ".stealth");
+const SOCKET_PATH = path.join(STEALTH_DIR, "daemon.sock");
+const PID_PATH = path.join(STEALTH_DIR, "daemon.pid");
 const DEFAULT_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 export { SOCKET_PATH, PID_PATH, STEALTH_DIR };
@@ -29,7 +36,7 @@ export { SOCKET_PATH, PID_PATH, STEALTH_DIR };
 export function isDaemonRunning() {
   try {
     if (!fs.existsSync(PID_PATH)) return false;
-    const pid = parseInt(fs.readFileSync(PID_PATH, 'utf-8').trim());
+    const pid = parseInt(fs.readFileSync(PID_PATH, "utf-8").trim());
     // Check if process is alive
     process.kill(pid, 0);
     // Also check if socket exists
@@ -45,8 +52,12 @@ export function isDaemonRunning() {
  * Clean up stale socket/pid files
  */
 function cleanup() {
-  try { fs.unlinkSync(SOCKET_PATH); } catch {}
-  try { fs.unlinkSync(PID_PATH); } catch {}
+  try {
+    fs.unlinkSync(SOCKET_PATH);
+  } catch {}
+  try {
+    fs.unlinkSync(PID_PATH);
+  } catch {}
 }
 
 /**
@@ -69,9 +80,9 @@ export async function startDaemon(opts = {}) {
   };
 
   // Launch browser
-  log('Launching Camoufox browser...');
+  log("Launching Camoufox browser...");
   const browser = await createBrowser({ headless: true });
-  log('Browser launched');
+  log("Browser launched");
 
   // Track contexts for reuse
   // key → { context, page, lastUsed }
@@ -81,12 +92,12 @@ export async function startDaemon(opts = {}) {
   function resetIdleTimer() {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(async () => {
-      log('Idle timeout reached, shutting down...');
+      log("Idle timeout reached, shutting down...");
       await shutdown();
     }, idleTimeout);
   }
 
-  async function getOrCreateContext(key = 'default', contextOpts = {}) {
+  async function getOrCreateContext(key = "default", contextOpts = {}) {
     resetIdleTimer();
 
     if (contexts.has(key)) {
@@ -95,11 +106,13 @@ export async function startDaemon(opts = {}) {
 
       // Check if page is still alive
       try {
-        await ctx.page.evaluate('1');
+        await ctx.page.evaluate("1");
         return ctx;
       } catch {
         // Page died, recreate
-        try { await ctx.context.close(); } catch {}
+        try {
+          await ctx.context.close();
+        } catch {}
         contexts.delete(key);
       }
     }
@@ -116,93 +129,170 @@ export async function startDaemon(opts = {}) {
   // Handle JSON request body
   function parseBody(req) {
     return new Promise((resolve, reject) => {
-      let body = '';
-      req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
+      let body = "";
+      req.on("data", (chunk) => {
+        body += chunk;
+      });
+      req.on("end", () => {
         try {
           resolve(body ? JSON.parse(body) : {});
         } catch (e) {
-          reject(new Error('Invalid JSON'));
+          reject(new Error("Invalid JSON"));
         }
       });
-      req.on('error', reject);
+      req.on("error", reject);
     });
   }
 
   // HTTP server on unix socket
   const server = http.createServer(async (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
+    res.setHeader("Content-Type", "application/json");
 
     try {
       const body = await parseBody(req);
-      const url = new URL(req.url, 'http://localhost');
+      const url = new URL(req.url, "http://localhost");
       const route = url.pathname;
 
       resetIdleTimer();
 
       // --- Routes ---
 
-      if (route === '/status') {
-        res.end(JSON.stringify({
-          ok: true,
-          pid: process.pid,
-          uptime: Math.floor(process.uptime()),
-          contexts: contexts.size,
-          browserConnected: browser.isConnected(),
-          memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
-        }));
+      if (route === "/status") {
+        res.end(
+          JSON.stringify({
+            ok: true,
+            pid: process.pid,
+            uptime: Math.floor(process.uptime()),
+            contexts: contexts.size,
+            browserConnected: browser.isConnected(),
+            memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+          }),
+        );
         return;
       }
 
-      if (route === '/navigate') {
-        const { key = 'default', url: targetUrl, waitUntil = 'domcontentloaded', timeout = 30000 } = body;
+      if (route === "/navigate") {
+        const {
+          key = "default",
+          url: targetUrl,
+          waitUntil = "domcontentloaded",
+          timeout = 30000,
+        } = body;
         const ctx = await getOrCreateContext(key);
         await ctx.page.goto(targetUrl, { waitUntil, timeout });
         res.end(JSON.stringify({ ok: true, url: ctx.page.url() }));
         return;
       }
 
-      if (route === '/snapshot') {
-        const { key = 'default' } = body;
+      if (route === "/snapshot") {
+        const { key = "default" } = body;
         const ctx = await getOrCreateContext(key);
-        const snapshot = await ctx.page.locator('body').ariaSnapshot({ timeout: 8000 }).catch(() => '');
+        const snapshot = await ctx.page
+          .locator("body")
+          .ariaSnapshot({ timeout: 8000 })
+          .catch(() => "");
         res.end(JSON.stringify({ ok: true, snapshot, url: ctx.page.url() }));
         return;
       }
 
-      if (route === '/text') {
-        const { key = 'default' } = body;
+      if (route === "/text") {
+        const { key = "default" } = body;
         const ctx = await getOrCreateContext(key);
         const text = await ctx.page.evaluate(extractPageText);
         res.end(JSON.stringify({ ok: true, text, url: ctx.page.url() }));
         return;
       }
 
-      if (route === '/screenshot') {
-        const { key = 'default', fullPage = false } = body;
+      if (route === "/screenshot") {
+        const { key = "default", fullPage = false } = body;
         const ctx = await getOrCreateContext(key);
-        const buffer = await ctx.page.screenshot({ type: 'png', fullPage });
-        res.end(JSON.stringify({ ok: true, data: buffer.toString('base64'), url: ctx.page.url() }));
+        const buffer = await ctx.page.screenshot({ type: "png", fullPage });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            data: buffer.toString("base64"),
+            url: ctx.page.url(),
+          }),
+        );
         return;
       }
 
-      if (route === '/evaluate') {
-        const { key = 'default', expression } = body;
+      if (route === "/evaluate") {
+        const { key = "default", expression } = body;
         const ctx = await getOrCreateContext(key);
         const result = await ctx.page.evaluate(expression);
         res.end(JSON.stringify({ ok: true, result }));
         return;
       }
 
-      if (route === '/title') {
-        const { key = 'default' } = body;
+      if (route === "/extract") {
+        const {
+          key = "default",
+          engine,
+          maxResults = 10,
+          alsoAsk = false,
+        } = body;
+        const ctx = await getOrCreateContext(key);
+        const extractor = getExtractorByEngine(engine || "generic");
+        const results = await extractor.extractResults(ctx.page, maxResults);
+
+        let peopleAlsoAsk = [];
+        if (alsoAsk && engine?.toLowerCase() === "google") {
+          peopleAlsoAsk = await googleExtractor.extractPeopleAlsoAsk(ctx.page);
+        }
+
+        res.end(
+          JSON.stringify({
+            ok: true,
+            results,
+            peopleAlsoAsk,
+            url: ctx.page.url(),
+          }),
+        );
+        return;
+      }
+
+      if (route === "/a11y-snapshot") {
+        const { key = "default" } = body;
+        const ctx = await getOrCreateContext(key);
+        const result = await buildA11yTree(ctx.page);
+        res.end(JSON.stringify({ ok: true, ...result }));
+        return;
+      }
+
+      if (route === "/click-ref") {
+        const { key = "default", ref } = body;
+        const ctx = await getOrCreateContext(key);
+        await clickByRef(ctx.page, ref);
+        res.end(JSON.stringify({ ok: true, url: ctx.page.url() }));
+        return;
+      }
+
+      if (route === "/type-ref") {
+        const { key = "default", ref, text, slowly, submit } = body;
+        const ctx = await getOrCreateContext(key);
+        await typeByRef(ctx.page, ref, text, { slowly, submit });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      if (route === "/hover-ref") {
+        const { key = "default", ref } = body;
+        const ctx = await getOrCreateContext(key);
+        await hoverByRef(ctx.page, ref);
+        res.end(JSON.stringify({ ok: true, url: ctx.page.url() }));
+        return;
+      }
+
+      if (route === "/title") {
+        const { key = "default" } = body;
         const ctx = await getOrCreateContext(key);
         const title = await ctx.page.title();
         res.end(JSON.stringify({ ok: true, title, url: ctx.page.url() }));
         return;
       }
 
-      if (route === '/close') {
+      if (route === "/close") {
         const { key } = body;
         if (key && contexts.has(key)) {
           const ctx = contexts.get(key);
@@ -213,14 +303,14 @@ export async function startDaemon(opts = {}) {
         return;
       }
 
-      if (route === '/shutdown') {
-        res.end(JSON.stringify({ ok: true, message: 'Shutting down' }));
+      if (route === "/shutdown") {
+        res.end(JSON.stringify({ ok: true, message: "Shutting down" }));
         setTimeout(() => shutdown(), 100);
         return;
       }
 
       res.statusCode = 404;
-      res.end(JSON.stringify({ error: 'Not found' }));
+      res.end(JSON.stringify({ error: "Not found" }));
     } catch (err) {
       res.statusCode = 500;
       res.end(JSON.stringify({ error: err.message }));
@@ -228,7 +318,7 @@ export async function startDaemon(opts = {}) {
   });
 
   async function shutdown() {
-    log('Shutting down daemon...');
+    log("Shutting down daemon...");
     for (const [, ctx] of contexts) {
       await ctx.context.close().catch(() => {});
     }
@@ -236,13 +326,13 @@ export async function startDaemon(opts = {}) {
     await browser.close().catch(() => {});
     server.close();
     cleanup();
-    log('Daemon stopped');
+    log("Daemon stopped");
     process.exit(0);
   }
 
   // Handle signals
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
 
   // Listen on unix socket
   server.listen(SOCKET_PATH, () => {
@@ -253,7 +343,7 @@ export async function startDaemon(opts = {}) {
     resetIdleTimer();
   });
 
-  server.on('error', (err) => {
+  server.on("error", (err) => {
     console.error(`Daemon error: ${err.message}`);
     cleanup();
     process.exit(1);

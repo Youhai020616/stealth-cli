@@ -6,16 +6,26 @@
  *   2. Daemon mode  — reuses background browser (faster)
  */
 
-import { withRetry, navigateWithRetry } from './retry.js';
-import { postNavigationBehavior } from './humanize.js';
-import { isDaemonRunning } from './daemon.js';
-import { daemonNavigate, daemonRequest } from './client.js';
-import { loadProfile, touchProfile, saveCookiesToProfile, loadCookiesFromProfile } from './profiles.js';
-import { restoreSession, captureSession } from './session.js';
-import { getNextProxy } from './proxy-pool.js';
-import { getHostOS, createBrowser, extractPageText } from './utils/browser-factory.js';
-import { log } from './output.js';
-import { BrowserLaunchError, NavigationError } from './errors.js';
+import { withRetry, navigateWithRetry } from "./retry.js";
+import { postNavigationBehavior } from "./humanize.js";
+import { isDaemonRunning } from "./daemon.js";
+import { daemonNavigate, daemonRequest } from "./client.js";
+import {
+  loadProfile,
+  touchProfile,
+  saveCookiesToProfile,
+  loadCookiesFromProfile,
+} from "./profiles.js";
+import { restoreSession, captureSession } from "./session.js";
+import { getNextProxy } from "./proxy-pool.js";
+import {
+  getHostOS,
+  createBrowser,
+  extractPageText,
+} from "./utils/browser-factory.js";
+import { log } from "./output.js";
+import { BrowserLaunchError, NavigationError } from "./errors.js";
+import { buildA11yTree, clickByRef, typeByRef, hoverByRef } from "./a11y.js";
 
 /**
  * Build proxy configuration
@@ -25,7 +35,7 @@ function buildProxy(proxyStr) {
 
   try {
     let url;
-    if (proxyStr.startsWith('http')) {
+    if (proxyStr.startsWith("http")) {
       url = new URL(proxyStr);
     } else {
       url = new URL(`http://${proxyStr}`);
@@ -37,7 +47,7 @@ function buildProxy(proxyStr) {
       password: url.password || undefined,
     };
   } catch {
-    const [host, port] = proxyStr.split(':');
+    const [host, port] = proxyStr.split(":");
     return { server: `http://${host}:${port}` };
   }
 }
@@ -64,8 +74,8 @@ export async function launchBrowser(opts = {}) {
     proxyRotate = false,
     profile: profileName,
     session: sessionName,
-    locale = 'en-US',
-    timezone = 'America/Los_Angeles',
+    locale = "en-US",
+    timezone = "America/Los_Angeles",
     viewport = { width: 1280, height: 720 },
     humanize = false,
   } = opts;
@@ -120,13 +130,16 @@ export async function launchBrowser(opts = {}) {
 
   const contextOptions = {
     viewport,
-    permissions: ['geolocation'],
+    permissions: ["geolocation"],
   };
 
   if (!proxy) {
     contextOptions.locale = locale;
     contextOptions.timezoneId = timezone;
-    const geo = profileData?.fingerprint?.geo || { latitude: 37.7749, longitude: -122.4194 };
+    const geo = profileData?.fingerprint?.geo || {
+      latitude: 37.7749,
+      longitude: -122.4194,
+    };
     contextOptions.geolocation = geo;
   }
 
@@ -146,16 +159,24 @@ export async function launchBrowser(opts = {}) {
   const page = await context.newPage();
 
   // If session had a last URL, navigate to it
-  if (sessionInfo?.lastUrl && sessionInfo.lastUrl !== 'about:blank') {
+  if (sessionInfo?.lastUrl && sessionInfo.lastUrl !== "about:blank") {
     try {
-      await page.goto(sessionInfo.lastUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.goto(sessionInfo.lastUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 15000,
+      });
     } catch (err) {
-      log.warn(`Session URL restore failed (${sessionInfo.lastUrl}): ${err.message}`);
+      log.warn(
+        `Session URL restore failed (${sessionInfo.lastUrl}): ${err.message}`,
+      );
     }
   }
 
   return {
-    browser, context, page, isDaemon: false,
+    browser,
+    context,
+    page,
+    isDaemon: false,
     _meta: { profileName, sessionName, proxyUrl: proxyStr, sessionInfo },
   };
 }
@@ -197,14 +218,20 @@ export async function closeBrowser(handle) {
  * @param {object} opts - Navigation options
  */
 export async function navigate(handle, url, opts = {}) {
-  const { timeout = 30000, waitUntil = 'domcontentloaded', humanize = false, retries = 2 } = opts;
+  const {
+    timeout = 30000,
+    waitUntil = "domcontentloaded",
+    humanize = false,
+    retries = 2,
+  } = opts;
 
   try {
     if (handle.isDaemon) {
       const result = await withRetry(
         async () => {
           const res = await daemonNavigate(url, { timeout, waitUntil });
-          if (!res?.ok) throw new Error(res?.error || 'Daemon navigation failed');
+          if (!res?.ok)
+            throw new Error(res?.error || "Daemon navigation failed");
           return res.url;
         },
         { maxRetries: retries, label: `navigate(daemon)` },
@@ -212,7 +239,11 @@ export async function navigate(handle, url, opts = {}) {
       return result;
     }
 
-    const finalUrl = await navigateWithRetry(handle.page, url, { timeout, waitUntil, maxRetries: retries });
+    const finalUrl = await navigateWithRetry(handle.page, url, {
+      timeout,
+      waitUntil,
+      maxRetries: retries,
+    });
 
     // Human behavior after navigation
     if (humanize) {
@@ -236,9 +267,9 @@ export async function waitForReady(page, opts = {}) {
 
   try {
     if (waitForNetwork) {
-      await page.waitForLoadState('networkidle', { timeout });
+      await page.waitForLoadState("networkidle", { timeout });
     } else {
-      await page.waitForLoadState('domcontentloaded', { timeout });
+      await page.waitForLoadState("domcontentloaded", { timeout });
     }
   } catch {
     // Timeout is OK
@@ -250,16 +281,18 @@ export async function waitForReady(page, opts = {}) {
  */
 export async function getSnapshot(handle) {
   if (handle.isDaemon) {
-    const res = await daemonRequest('/snapshot');
-    return res?.snapshot || '';
+    const res = await daemonRequest("/snapshot");
+    return res?.snapshot || "";
   }
 
   try {
     await waitForReady(handle.page, { waitForNetwork: false });
-    const snapshot = await handle.page.locator('body').ariaSnapshot({ timeout: 8000 });
-    return snapshot || '';
+    const snapshot = await handle.page
+      .locator("body")
+      .ariaSnapshot({ timeout: 8000 });
+    return snapshot || "";
   } catch {
-    return '';
+    return "";
   }
 }
 
@@ -268,8 +301,8 @@ export async function getSnapshot(handle) {
  */
 export async function getTextContent(handle) {
   if (handle.isDaemon) {
-    const res = await daemonRequest('/text');
-    return res?.text || '';
+    const res = await daemonRequest("/text");
+    return res?.text || "";
   }
 
   return handle.page.evaluate(extractPageText);
@@ -280,8 +313,8 @@ export async function getTextContent(handle) {
  */
 export async function getTitle(handle) {
   if (handle.isDaemon) {
-    const res = await daemonRequest('/title');
-    return res?.title || '';
+    const res = await daemonRequest("/title");
+    return res?.title || "";
   }
   return handle.page.title();
 }
@@ -292,8 +325,8 @@ export async function getTitle(handle) {
 export async function getUrl(handle) {
   if (handle.isDaemon) {
     // Use /title endpoint which returns the current page URL
-    const res = await daemonRequest('/title');
-    return res?.url || 'about:blank';
+    const res = await daemonRequest("/title");
+    return res?.url || "about:blank";
   }
   return handle.page.url();
 }
@@ -305,10 +338,10 @@ export async function takeScreenshot(handle, opts = {}) {
   const { path: filePath, fullPage = false } = opts;
 
   if (handle.isDaemon) {
-    const res = await daemonRequest('/screenshot', { fullPage });
+    const res = await daemonRequest("/screenshot", { fullPage });
     if (res?.data && filePath) {
-      const { writeFileSync } = await import('fs');
-      writeFileSync(filePath, Buffer.from(res.data, 'base64'));
+      const { writeFileSync } = await import("fs");
+      writeFileSync(filePath, Buffer.from(res.data, "base64"));
     }
     return res;
   }
@@ -317,7 +350,7 @@ export async function takeScreenshot(handle, opts = {}) {
   if (filePath) screenshotOpts.path = filePath;
 
   const buffer = await handle.page.screenshot(screenshotOpts);
-  return { data: buffer.toString('base64') };
+  return { data: buffer.toString("base64") };
 }
 
 /**
@@ -325,8 +358,62 @@ export async function takeScreenshot(handle, opts = {}) {
  */
 export async function evaluate(handle, expression) {
   if (handle.isDaemon) {
-    const res = await daemonRequest('/evaluate', { expression });
+    const res = await daemonRequest("/evaluate", { expression });
     return res?.result;
   }
   return handle.page.evaluate(expression);
+}
+
+/**
+ * Get accessibility tree snapshot with [ref=eN] markers
+ */
+export async function getA11ySnapshot(handle) {
+  if (handle.isDaemon) {
+    const res = await daemonRequest("/a11y-snapshot");
+    if (res?.ok) {
+      return {
+        tree: res.tree || "",
+        refs: res.refs || {},
+        totalRefs: res.totalRefs || 0,
+      };
+    }
+    return { tree: "", refs: {}, totalRefs: 0 };
+  }
+  return buildA11yTree(handle.page);
+}
+
+/**
+ * Click element by ref ID from accessibility snapshot
+ */
+export async function clickRef(handle, ref) {
+  if (handle.isDaemon) {
+    const res = await daemonRequest("/click-ref", { ref });
+    if (!res?.ok) throw new Error(res?.error || "Click ref failed");
+    return;
+  }
+  await clickByRef(handle.page, ref);
+}
+
+/**
+ * Type text into element by ref ID from accessibility snapshot
+ */
+export async function typeRef(handle, ref, text, opts = {}) {
+  if (handle.isDaemon) {
+    const res = await daemonRequest("/type-ref", { ref, text, ...opts });
+    if (!res?.ok) throw new Error(res?.error || "Type ref failed");
+    return;
+  }
+  await typeByRef(handle.page, ref, text, opts);
+}
+
+/**
+ * Hover element by ref ID from accessibility snapshot
+ */
+export async function hoverRef(handle, ref) {
+  if (handle.isDaemon) {
+    const res = await daemonRequest("/hover-ref", { ref });
+    if (!res?.ok) throw new Error(res?.error || "Hover ref failed");
+    return;
+  }
+  await hoverByRef(handle.page, ref);
 }

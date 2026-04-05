@@ -5,27 +5,38 @@
  * AI agents and other tools.
  */
 
-import http from 'http';
-import crypto from 'crypto';
-import { log } from '../output.js';
-import { createBrowser, createContext, extractPageText } from '../utils/browser-factory.js';
+import http from "http";
+import crypto from "crypto";
+import { log } from "../output.js";
+import {
+  createBrowser,
+  createContext,
+  extractPageText,
+} from "../utils/browser-factory.js";
+import { buildA11yTree, clickByRef, typeByRef } from "../a11y.js";
 
 export function registerServe(program) {
   program
-    .command('serve')
-    .description('Start HTTP API server for AI agents and external tools')
-    .option('-p, --port <port>', 'Port number', '9377')
-    .option('--host <host>', 'Host to bind to', '127.0.0.1')
-    .option('--proxy <proxy>', 'Default proxy for all requests')
-    .option('--no-headless', 'Show browser window')
-    .option('--token <token>', 'API token for authentication (auto-generated if not set)')
-    .option('--no-auth', 'Disable authentication (only recommended on localhost)')
+    .command("serve")
+    .description("Start HTTP API server for AI agents and external tools")
+    .option("-p, --port <port>", "Port number", "9377")
+    .option("--host <host>", "Host to bind to", "127.0.0.1")
+    .option("--proxy <proxy>", "Default proxy for all requests")
+    .option("--no-headless", "Show browser window")
+    .option(
+      "--token <token>",
+      "API token for authentication (auto-generated if not set)",
+    )
+    .option(
+      "--no-auth",
+      "Disable authentication (only recommended on localhost)",
+    )
     .action(async (opts) => {
       const port = parseInt(opts.port, 10);
       const host = opts.host;
-      const apiToken = opts.token || crypto.randomBytes(24).toString('hex');
+      const apiToken = opts.token || crypto.randomBytes(24).toString("hex");
 
-      log.info('Starting stealth API server...');
+      log.info("Starting stealth API server...");
 
       // Launch browser
       const browser = await createBrowser({ headless: opts.headless });
@@ -70,18 +81,23 @@ export function registerServe(program) {
       // Parse JSON body
       function parseBody(req) {
         return new Promise((resolve) => {
-          let body = '';
-          req.on('data', (c) => { body += c; });
-          req.on('end', () => {
-            try { resolve(body ? JSON.parse(body) : {}); }
-            catch { resolve({}); }
+          let body = "";
+          req.on("data", (c) => {
+            body += c;
+          });
+          req.on("end", () => {
+            try {
+              resolve(body ? JSON.parse(body) : {});
+            } catch {
+              resolve({});
+            }
           });
         });
       }
 
       // JSON response helper
       function json(res, data, status = 200) {
-        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.writeHead(status, { "Content-Type": "application/json" });
         res.end(JSON.stringify(data));
       }
 
@@ -91,37 +107,57 @@ export function registerServe(program) {
         const method = req.method;
 
         try {
-          const body = method === 'POST' ? await parseBody(req) : {};
+          const body = method === "POST" ? await parseBody(req) : {};
 
           // --- Health (no auth required) ---
-          if (route === '/health') {
-            return json(res, { ok: true, engine: 'camoufox', pages: pages.size });
+          if (route === "/health") {
+            return json(res, {
+              ok: true,
+              engine: "camoufox",
+              pages: pages.size,
+            });
           }
 
           // --- Auth check ---
           if (opts.auth !== false) {
-            const authHeader = req.headers['authorization'];
-            const token = authHeader ? authHeader.replace(/^Bearer\s+/i, '') : '';
+            const authHeader = req.headers["authorization"];
+            const token = authHeader
+              ? authHeader.replace(/^Bearer\s+/i, "")
+              : "";
             if (token !== apiToken) {
-              return json(res, { error: 'Unauthorized. Use: -H "Authorization: Bearer <token>"' }, 401);
+              return json(
+                res,
+                {
+                  error:
+                    'Unauthorized. Use: -H "Authorization: Bearer <token>"',
+                },
+                401,
+              );
             }
           }
 
           // --- Create tab ---
-          if (route === '/tabs' && method === 'POST') {
+          if (route === "/tabs" && method === "POST") {
             const { url: targetUrl } = body;
             const { id, page } = await createPage();
             if (targetUrl) {
-              await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              await page.goto(targetUrl, {
+                waitUntil: "domcontentloaded",
+                timeout: 30000,
+              });
             }
             return json(res, { ok: true, id, url: page.url() });
           }
 
           // --- List tabs ---
-          if (route === '/tabs' && method === 'GET') {
+          if (route === "/tabs" && method === "GET") {
             const tabs = [];
             for (const [id, entry] of pages) {
-              tabs.push({ id, url: entry.page.url(), title: await entry.page.title().catch(() => '') });
+              tabs.push({
+                id,
+                url: entry.page.url(),
+                title: await entry.page.title().catch(() => ""),
+              });
             }
             return json(res, { tabs });
           }
@@ -131,50 +167,77 @@ export function registerServe(program) {
           if (tabMatch) {
             const [, tabId, action] = tabMatch;
             const entry = getPage(tabId);
-            if (!entry) return json(res, { error: 'Tab not found' }, 404);
+            if (!entry) return json(res, { error: "Tab not found" }, 404);
             const { page } = entry;
 
             switch (action) {
-              case 'navigate': {
+              case "navigate": {
                 const { url: navUrl } = body;
-                await page.goto(navUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                await page.goto(navUrl, {
+                  waitUntil: "domcontentloaded",
+                  timeout: 30000,
+                });
                 return json(res, { ok: true, url: page.url() });
               }
 
-              case 'snapshot': {
-                const snapshot = await page.locator('body').ariaSnapshot({ timeout: 8000 }).catch(() => '');
+              case "snapshot": {
+                const snapshot = await page
+                  .locator("body")
+                  .ariaSnapshot({ timeout: 8000 })
+                  .catch(() => "");
                 return json(res, { ok: true, snapshot, url: page.url() });
               }
 
-              case 'text': {
+              case "text": {
                 const text = await page.evaluate(extractPageText);
                 return json(res, { ok: true, text, url: page.url() });
               }
 
-              case 'screenshot': {
-                const buffer = await page.screenshot({ type: 'png' });
-                return json(res, { ok: true, data: buffer.toString('base64'), mimeType: 'image/png' });
+              case "screenshot": {
+                const buffer = await page.screenshot({ type: "png" });
+                return json(res, {
+                  ok: true,
+                  data: buffer.toString("base64"),
+                  mimeType: "image/png",
+                });
               }
 
-              case 'click': {
+              case "click": {
                 const { selector } = body;
                 await page.click(selector, { timeout: 5000 });
                 return json(res, { ok: true, url: page.url() });
               }
 
-              case 'type': {
+              case "type": {
                 const { selector, text } = body;
                 await page.fill(selector, text);
                 return json(res, { ok: true });
               }
 
-              case 'evaluate': {
+              case "evaluate": {
                 const { expression } = body;
                 const result = await page.evaluate(expression);
                 return json(res, { ok: true, result });
               }
 
-              case 'close': {
+              case "a11y-snapshot": {
+                const result = await buildA11yTree(page);
+                return json(res, { ok: true, ...result, url: page.url() });
+              }
+
+              case "click-ref": {
+                const { ref } = body;
+                await clickByRef(page, ref);
+                return json(res, { ok: true, url: page.url() });
+              }
+
+              case "type-ref": {
+                const { ref, text, slowly, submit } = body;
+                await typeByRef(page, ref, text, { slowly, submit });
+                return json(res, { ok: true });
+              }
+
+              case "close": {
                 await entry.context.close().catch(() => {});
                 pages.delete(tabId);
                 return json(res, { ok: true });
@@ -187,7 +250,7 @@ export function registerServe(program) {
 
           // --- Close tab by DELETE ---
           const deleteMatch = route.match(/^\/tabs\/([^/]+)$/);
-          if (deleteMatch && method === 'DELETE') {
+          if (deleteMatch && method === "DELETE") {
             const entry = getPage(deleteMatch[1]);
             if (entry) {
               await entry.context.close().catch(() => {});
@@ -197,17 +260,18 @@ export function registerServe(program) {
           }
 
           // --- Shutdown ---
-          if (route === '/shutdown' && method === 'POST') {
-            json(res, { ok: true, message: 'Shutting down' });
+          if (route === "/shutdown" && method === "POST") {
+            json(res, { ok: true, message: "Shutting down" });
             setTimeout(async () => {
-              for (const [, e] of pages) await e.context.close().catch(() => {});
+              for (const [, e] of pages)
+                await e.context.close().catch(() => {});
               await browser.close().catch(() => {});
               process.exit(0);
             }, 200);
             return;
           }
 
-          json(res, { error: 'Not found' }, 404);
+          json(res, { error: "Not found" }, 404);
         } catch (err) {
           json(res, { error: err.message }, 500);
         }
@@ -230,26 +294,37 @@ export function registerServe(program) {
           log.info(`API Token: ${apiToken}`);
           log.dim(`  Use: curl -H "Authorization: Bearer ${apiToken}" ...`);
         } else {
-          log.warn('Authentication disabled (--no-auth)');
+          log.warn("Authentication disabled (--no-auth)");
         }
-        log.dim('  Endpoints:');
-        log.dim('    GET  /health                    — Server status');
-        log.dim('    POST /tabs                      — Create tab { url }');
-        log.dim('    GET  /tabs                      — List tabs');
-        log.dim('    POST /tabs/:id/navigate         — Navigate { url }');
-        log.dim('    GET  /tabs/:id/snapshot          — Accessibility snapshot');
-        log.dim('    GET  /tabs/:id/text              — Page text');
-        log.dim('    GET  /tabs/:id/screenshot        — Screenshot (base64)');
-        log.dim('    POST /tabs/:id/click             — Click { selector }');
-        log.dim('    POST /tabs/:id/type              — Type { selector, text }');
-        log.dim('    POST /tabs/:id/evaluate          — Eval JS { expression }');
-        log.dim('    DELETE /tabs/:id                 — Close tab');
-        log.dim('    POST /shutdown                   — Stop server');
+        log.dim("  Endpoints:");
+        log.dim("    GET  /health                    — Server status");
+        log.dim("    POST /tabs                      — Create tab { url }");
+        log.dim("    GET  /tabs                      — List tabs");
+        log.dim("    POST /tabs/:id/navigate         — Navigate { url }");
+        log.dim(
+          "    GET  /tabs/:id/snapshot          — Accessibility snapshot",
+        );
+        log.dim("    GET  /tabs/:id/text              — Page text");
+        log.dim("    GET  /tabs/:id/screenshot        — Screenshot (base64)");
+        log.dim("    POST /tabs/:id/click             — Click { selector }");
+        log.dim(
+          "    POST /tabs/:id/type              — Type { selector, text }",
+        );
+        log.dim(
+          "    POST /tabs/:id/evaluate          — Eval JS { expression }",
+        );
+        log.dim("    GET  /tabs/:id/a11y-snapshot     — A11y tree with refs");
+        log.dim("    POST /tabs/:id/click-ref          — Click by ref { ref }");
+        log.dim(
+          "    POST /tabs/:id/type-ref           — Type by ref { ref, text }",
+        );
+        log.dim("    DELETE /tabs/:id                 — Close tab");
+        log.dim("    POST /shutdown                   — Stop server");
       });
 
       // Graceful shutdown
-      process.on('SIGINT', async () => {
-        log.info('Shutting down...');
+      process.on("SIGINT", async () => {
+        log.info("Shutting down...");
         for (const [, e] of pages) await e.context.close().catch(() => {});
         await browser.close().catch(() => {});
         server.close();

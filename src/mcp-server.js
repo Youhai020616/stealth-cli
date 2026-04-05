@@ -18,11 +18,16 @@
  *   }
  */
 
-import { createRequire } from 'module';
-import { createBrowser, createContext, extractPageText } from './utils/browser-factory.js';
+import { createRequire } from "module";
+import {
+  createBrowser,
+  createContext,
+  extractPageText,
+} from "./utils/browser-factory.js";
+import { buildA11yTree, clickByRef, typeByRef } from "./a11y.js";
 
 const require = createRequire(import.meta.url);
-const { version: PKG_VERSION } = require('../package.json');
+const { version: PKG_VERSION } = require("../package.json");
 
 // --- MCP Protocol Implementation (stdio JSON-RPC) ---
 
@@ -36,88 +41,157 @@ class McpServer {
   _defineTools() {
     return [
       {
-        name: 'stealth_browse',
-        description: 'Visit a URL with anti-detection and return page content. Bypasses Cloudflare and bot detection.',
+        name: "stealth_browse",
+        description:
+          "Visit a URL with anti-detection and return page content. Bypasses Cloudflare and bot detection.",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            url: { type: 'string', description: 'URL to visit' },
-            format: { type: 'string', enum: ['text', 'snapshot'], default: 'text', description: 'Output format' },
+            url: { type: "string", description: "URL to visit" },
+            format: {
+              type: "string",
+              enum: ["text", "snapshot"],
+              default: "text",
+              description: "Output format",
+            },
           },
-          required: ['url'],
+          required: ["url"],
         },
       },
       {
-        name: 'stealth_screenshot',
-        description: 'Take a screenshot of a page with anti-detection. Returns base64 PNG.',
+        name: "stealth_screenshot",
+        description:
+          "Take a screenshot of a page with anti-detection. Returns base64 PNG.",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            url: { type: 'string', description: 'URL to screenshot' },
-            fullPage: { type: 'boolean', default: false, description: 'Capture full page' },
+            url: { type: "string", description: "URL to screenshot" },
+            fullPage: {
+              type: "boolean",
+              default: false,
+              description: "Capture full page",
+            },
           },
-          required: ['url'],
+          required: ["url"],
         },
       },
       {
-        name: 'stealth_search',
-        description: 'Search the web with anti-detection. Supports Google, DuckDuckGo, Bing, YouTube, GitHub. Returns structured results.',
+        name: "stealth_search",
+        description:
+          "Search the web with anti-detection. Supports Google, DuckDuckGo, Bing, YouTube, GitHub. Returns structured results.",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            engine: { type: 'string', enum: ['google', 'duckduckgo', 'bing', 'youtube', 'github'], description: 'Search engine' },
-            query: { type: 'string', description: 'Search query' },
-            maxResults: { type: 'number', default: 10, description: 'Max results to return' },
+            engine: {
+              type: "string",
+              enum: ["google", "duckduckgo", "bing", "youtube", "github"],
+              description: "Search engine",
+            },
+            query: { type: "string", description: "Search query" },
+            maxResults: {
+              type: "number",
+              default: 10,
+              description: "Max results to return",
+            },
           },
-          required: ['engine', 'query'],
+          required: ["engine", "query"],
         },
       },
       {
-        name: 'stealth_extract',
-        description: 'Extract structured data from a page: links, images, meta tags, headings, or CSS selector content.',
+        name: "stealth_extract",
+        description:
+          "Extract structured data from a page: links, images, meta tags, headings, or CSS selector content.",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            url: { type: 'string', description: 'URL to extract from' },
-            type: { type: 'string', enum: ['links', 'images', 'meta', 'headers', 'selector'], description: 'What to extract' },
-            selector: { type: 'string', description: 'CSS selector (when type=selector)' },
+            url: { type: "string", description: "URL to extract from" },
+            type: {
+              type: "string",
+              enum: ["links", "images", "meta", "headers", "selector"],
+              description: "What to extract",
+            },
+            selector: {
+              type: "string",
+              description: "CSS selector (when type=selector)",
+            },
           },
-          required: ['url', 'type'],
+          required: ["url", "type"],
         },
       },
       {
-        name: 'stealth_click',
-        description: 'Click an element on the current page by CSS selector.',
+        name: "stealth_click",
+        description:
+          "Click an element on the current page by CSS selector or ref from stealth_snapshot.",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            selector: { type: 'string', description: 'CSS selector to click' },
+            selector: {
+              type: "string",
+              description: "CSS selector to click (use this OR ref)",
+            },
+            ref: {
+              type: "string",
+              description:
+                'Element ref from stealth_snapshot (e.g. "e3"). Preferred over selector.',
+            },
           },
-          required: ['selector'],
+          required: [],
         },
       },
       {
-        name: 'stealth_type',
-        description: 'Type text into an input element on the current page.',
+        name: "stealth_type",
+        description:
+          "Type text into an input element on the current page by CSS selector or ref from stealth_snapshot.",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            selector: { type: 'string', description: 'CSS selector of input' },
-            text: { type: 'string', description: 'Text to type' },
-            pressEnter: { type: 'boolean', default: false, description: 'Press Enter after typing' },
+            selector: {
+              type: "string",
+              description: "CSS selector of input (use this OR ref)",
+            },
+            ref: {
+              type: "string",
+              description:
+                'Element ref from stealth_snapshot (e.g. "e4"). Preferred over selector.',
+            },
+            text: { type: "string", description: "Text to type" },
+            pressEnter: {
+              type: "boolean",
+              default: false,
+              description: "Press Enter after typing",
+            },
+            slowly: {
+              type: "boolean",
+              default: false,
+              description:
+                "Type character by character (useful for autocomplete)",
+            },
           },
-          required: ['selector', 'text'],
+          required: ["text"],
         },
       },
       {
-        name: 'stealth_evaluate',
-        description: 'Execute JavaScript in the current page context and return the result.',
+        name: "stealth_evaluate",
+        description:
+          "Execute JavaScript in the current page context and return the result.",
         inputSchema: {
-          type: 'object',
+          type: "object",
           properties: {
-            expression: { type: 'string', description: 'JavaScript expression to evaluate' },
+            expression: {
+              type: "string",
+              description: "JavaScript expression to evaluate",
+            },
           },
-          required: ['expression'],
+          required: ["expression"],
+        },
+      },
+      {
+        name: "stealth_snapshot",
+        description:
+          "Get accessibility tree snapshot with [ref=eN] markers on interactive elements. Use refs to click/type elements. Call this before stealth_click or stealth_type with ref.",
+        inputSchema: {
+          type: "object",
+          properties: {},
         },
       },
     ];
@@ -129,11 +203,11 @@ class McpServer {
     return this.browser;
   }
 
-  async getPage(key = 'default') {
+  async getPage(key = "default") {
     if (this.contexts.has(key)) {
       const entry = this.contexts.get(key);
       try {
-        await entry.page.evaluate('1');
+        await entry.page.evaluate("1");
         return entry;
       } catch {
         this.contexts.delete(key);
@@ -151,39 +225,59 @@ class McpServer {
     const { page } = await this.getPage();
 
     switch (name) {
-      case 'stealth_browse': {
-        await page.goto(args.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+      case "stealth_browse": {
+        await page.goto(args.url, {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+        await page
+          .waitForLoadState("networkidle", { timeout: 5000 })
+          .catch(() => {});
 
-        if (args.format === 'snapshot') {
-          const snapshot = await page.locator('body').ariaSnapshot({ timeout: 8000 }).catch(() => '');
-          return text(`URL: ${page.url()}\n\n${snapshot}`);
+        if (args.format === "snapshot") {
+          const { tree, totalRefs } = await buildA11yTree(page);
+          return text(
+            `URL: ${page.url()}\nInteractive elements: ${totalRefs}\n\n${tree}`,
+          );
         }
 
         const content = await page.evaluate(extractPageText);
-        const title = await page.title().catch(() => '');
-        return text(`Title: ${title}\nURL: ${page.url()}\n\n${content.slice(0, 15000)}`);
+        const title = await page.title().catch(() => "");
+        return text(
+          `Title: ${title}\nURL: ${page.url()}\n\n${content.slice(0, 15000)}`,
+        );
       }
 
-      case 'stealth_screenshot': {
-        await page.goto(args.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-        const buffer = await page.screenshot({ type: 'png', fullPage: args.fullPage || false });
-        return image(buffer.toString('base64'));
+      case "stealth_screenshot": {
+        await page.goto(args.url, {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+        await page
+          .waitForLoadState("networkidle", { timeout: 5000 })
+          .catch(() => {});
+        const buffer = await page.screenshot({
+          type: "png",
+          fullPage: args.fullPage || false,
+        });
+        return image(buffer.toString("base64"));
       }
 
-      case 'stealth_search': {
-        const { expandMacro } = await import('./macros.js');
-        const { getExtractorByEngine } = await import('./extractors/index.js');
+      case "stealth_search": {
+        const { expandMacro } = await import("./macros.js");
+        const { getExtractorByEngine } = await import("./extractors/index.js");
 
         const url = expandMacro(args.engine, args.query);
         if (!url) return text(`Unknown engine: ${args.engine}`);
 
-        const isGoogle = args.engine === 'google';
+        const isGoogle = args.engine === "google";
 
         if (isGoogle) {
-          const { humanType, randomDelay } = await import('./humanize.js');
-          await page.goto('https://www.google.com', { waitUntil: 'domcontentloaded', timeout: 15000 });
+          const { humanType, randomDelay } = await import("./humanize.js");
+          await page.goto("https://www.google.com", {
+            waitUntil: "domcontentloaded",
+            timeout: 15000,
+          });
           await randomDelay(800, 2000);
 
           // Handle cookie consent (EU/UK)
@@ -199,66 +293,166 @@ class McpServer {
 
           // Human-like typing (consistent with CLI search command)
           try {
-            await humanType(page, 'textarea[name="q"], input[name="q"]', args.query, {
-              pressEnter: true,
-            });
+            await humanType(
+              page,
+              'textarea[name="q"], input[name="q"]',
+              args.query,
+              {
+                pressEnter: true,
+              },
+            );
           } catch {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await page.goto(url, {
+              waitUntil: "domcontentloaded",
+              timeout: 30000,
+            });
           }
         } else {
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.goto(url, {
+            waitUntil: "domcontentloaded",
+            timeout: 30000,
+          });
         }
 
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+        await page
+          .waitForLoadState("networkidle", { timeout: 5000 })
+          .catch(() => {});
         const extractor = getExtractorByEngine(args.engine);
-        const results = await extractor.extractResults(page, args.maxResults || 10);
+        const results = await extractor.extractResults(
+          page,
+          args.maxResults || 10,
+        );
 
-        return text(JSON.stringify({ engine: args.engine, query: args.query, url: page.url(), results, count: results.length }, null, 2));
+        return text(
+          JSON.stringify(
+            {
+              engine: args.engine,
+              query: args.query,
+              url: page.url(),
+              results,
+              count: results.length,
+            },
+            null,
+            2,
+          ),
+        );
       }
 
-      case 'stealth_extract': {
-        await page.goto(args.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+      case "stealth_extract": {
+        await page.goto(args.url, {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+        await page
+          .waitForLoadState("networkidle", { timeout: 5000 })
+          .catch(() => {});
 
         let data;
         switch (args.type) {
-          case 'links':
-            data = await page.evaluate(() => Array.from(document.querySelectorAll('a[href]')).filter((a) => a.href.startsWith('http')).map((a) => ({ url: a.href, text: a.textContent?.trim().slice(0, 100) })));
+          case "links":
+            data = await page.evaluate(() =>
+              Array.from(document.querySelectorAll("a[href]"))
+                .filter((a) => a.href.startsWith("http"))
+                .map((a) => ({
+                  url: a.href,
+                  text: a.textContent?.trim().slice(0, 100),
+                })),
+            );
             break;
-          case 'images':
-            data = await page.evaluate(() => Array.from(document.querySelectorAll('img[src]')).map((i) => ({ src: i.src, alt: i.alt })));
+          case "images":
+            data = await page.evaluate(() =>
+              Array.from(document.querySelectorAll("img[src]")).map((i) => ({
+                src: i.src,
+                alt: i.alt,
+              })),
+            );
             break;
-          case 'meta':
-            data = await page.evaluate(() => ({ title: document.title, description: document.querySelector('meta[name="description"]')?.content || '', ogTitle: document.querySelector('meta[property="og:title"]')?.content || '', ogImage: document.querySelector('meta[property="og:image"]')?.content || '' }));
+          case "meta":
+            data = await page.evaluate(() => ({
+              title: document.title,
+              description:
+                document.querySelector('meta[name="description"]')?.content ||
+                "",
+              ogTitle:
+                document.querySelector('meta[property="og:title"]')?.content ||
+                "",
+              ogImage:
+                document.querySelector('meta[property="og:image"]')?.content ||
+                "",
+            }));
             break;
-          case 'headers':
-            data = await page.evaluate(() => Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6')).map((h) => ({ level: parseInt(h.tagName[1]), text: h.textContent?.trim() })));
+          case "headers":
+            data = await page.evaluate(() =>
+              Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6")).map(
+                (h) => ({
+                  level: parseInt(h.tagName[1]),
+                  text: h.textContent?.trim(),
+                }),
+              ),
+            );
             break;
-          case 'selector':
-            data = await page.evaluate((sel) => Array.from(document.querySelectorAll(sel)).map((e) => e.textContent?.trim()), args.selector || 'body');
+          case "selector":
+            data = await page.evaluate(
+              (sel) =>
+                Array.from(document.querySelectorAll(sel)).map((e) =>
+                  e.textContent?.trim(),
+                ),
+              args.selector || "body",
+            );
             break;
           default:
             return text(`Unknown extract type: ${args.type}`);
         }
 
-        return text(JSON.stringify({ url: page.url(), type: args.type, data }, null, 2));
+        return text(
+          JSON.stringify({ url: page.url(), type: args.type, data }, null, 2),
+        );
       }
 
-      case 'stealth_click': {
-        await page.click(args.selector, { timeout: 5000 });
+      case "stealth_click": {
+        if (args.ref) {
+          await clickByRef(page, args.ref);
+        } else if (args.selector) {
+          await page.click(args.selector, { timeout: 5000 });
+        } else {
+          return text('Error: provide either "ref" or "selector"');
+        }
         await page.waitForTimeout(500);
-        return text(`Clicked: ${args.selector}\nURL: ${page.url()}`);
+        const { tree, totalRefs } = await buildA11yTree(page);
+        return text(
+          `Clicked: ${args.ref ? `ref=${args.ref}` : args.selector}\nURL: ${page.url()}\nInteractive elements: ${totalRefs}\n\n${tree}`,
+        );
       }
 
-      case 'stealth_type': {
-        await page.fill(args.selector, args.text);
-        if (args.pressEnter) await page.keyboard.press('Enter');
-        return text(`Typed "${args.text}" into ${args.selector}`);
+      case "stealth_type": {
+        if (args.ref) {
+          await typeByRef(page, args.ref, args.text, {
+            submit: args.pressEnter,
+            slowly: args.slowly,
+          });
+        } else if (args.selector) {
+          await page.fill(args.selector, args.text);
+          if (args.pressEnter) await page.keyboard.press("Enter");
+        } else {
+          return text('Error: provide either "ref" or "selector"');
+        }
+        return text(
+          `Typed "${args.text}" into ${args.ref ? `ref=${args.ref}` : args.selector}`,
+        );
       }
 
-      case 'stealth_evaluate': {
+      case "stealth_snapshot": {
+        const { tree, totalRefs } = await buildA11yTree(page);
+        return text(
+          `URL: ${page.url()}\nInteractive elements: ${totalRefs}\n\n${tree}`,
+        );
+      }
+
+      case "stealth_evaluate": {
         const result = await page.evaluate(args.expression);
-        return text(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
+        return text(
+          typeof result === "string" ? result : JSON.stringify(result, null, 2),
+        );
       }
 
       default:
@@ -268,8 +462,11 @@ class McpServer {
 
   // MCP stdio message loop
   async run() {
-    const readline = await import('readline');
-    const rl = readline.createInterface({ input: process.stdin, terminal: false });
+    const readline = await import("readline");
+    const rl = readline.createInterface({
+      input: process.stdin,
+      terminal: false,
+    });
 
     for await (const line of rl) {
       if (!line.trim()) continue;
@@ -287,22 +484,22 @@ class McpServer {
         let result;
 
         switch (method) {
-          case 'initialize':
+          case "initialize":
             result = {
-              protocolVersion: '2024-11-05',
+              protocolVersion: "2024-11-05",
               capabilities: { tools: {} },
-              serverInfo: { name: 'stealth-cli', version: PKG_VERSION },
+              serverInfo: { name: "stealth-cli", version: PKG_VERSION },
             };
             break;
 
-          case 'notifications/initialized':
+          case "notifications/initialized":
             continue; // No response needed
 
-          case 'tools/list':
+          case "tools/list":
             result = { tools: this.tools };
             break;
 
-          case 'tools/call': {
+          case "tools/call": {
             const { name, arguments: args } = params;
             const content = await this.handleToolCall(name, args || {});
             result = { content };
@@ -310,15 +507,21 @@ class McpServer {
           }
 
           default:
-            result = { error: { code: -32601, message: `Unknown method: ${method}` } };
+            result = {
+              error: { code: -32601, message: `Unknown method: ${method}` },
+            };
         }
 
         if (id !== undefined) {
-          this.send({ jsonrpc: '2.0', id, result });
+          this.send({ jsonrpc: "2.0", id, result });
         }
       } catch (err) {
         if (id !== undefined) {
-          this.send({ jsonrpc: '2.0', id, error: { code: -1, message: err.message } });
+          this.send({
+            jsonrpc: "2.0",
+            id,
+            error: { code: -1, message: err.message },
+          });
         }
       }
     }
@@ -331,18 +534,18 @@ class McpServer {
   }
 
   send(msg) {
-    process.stdout.write(JSON.stringify(msg) + '\n');
+    process.stdout.write(JSON.stringify(msg) + "\n");
   }
 }
 
 // Helper: text content block
 function text(content) {
-  return [{ type: 'text', text: content }];
+  return [{ type: "text", text: content }];
 }
 
 // Helper: image content block
 function image(base64Data) {
-  return [{ type: 'image', data: base64Data, mimeType: 'image/png' }];
+  return [{ type: "image", data: base64Data, mimeType: "image/png" }];
 }
 
 export { McpServer };
