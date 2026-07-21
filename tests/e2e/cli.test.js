@@ -31,6 +31,30 @@ describe('CLI integration', () => {
     expect(stdout).toContain('browse');
     expect(stdout).toContain('screenshot');
     expect(stdout).toContain('search');
+    expect(stdout).toContain('open');
+  });
+
+  it('should expose headed open and interactive persistence options', () => {
+    const openHelp = run(['open', '--help']).stdout;
+    const interactiveHelp = run(['interactive', '--help']).stdout;
+
+    expect(openHelp).toContain('headed browser');
+    expect(openHelp).toContain('--profile');
+    expect(openHelp).toContain('--session');
+    expect(openHelp).toContain('--checkpoint-interval');
+    expect(interactiveHelp).toContain('--profile');
+    expect(interactiveHelp).toContain('--session');
+  });
+
+  it('should fail before launch for a missing explicit profile', () => {
+    const { stderr, exitCode } = run([
+      'open',
+      '--profile',
+      '__missing_profile_for_cli_test__',
+    ]);
+
+    expect(exitCode).toBe(8);
+    expect(stderr).toContain('not found');
   });
 
   it('should show version', () => {

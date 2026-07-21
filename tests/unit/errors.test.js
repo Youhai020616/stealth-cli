@@ -7,6 +7,7 @@ import {
   TimeoutError,
   ProxyError,
   ProfileError,
+  PersistenceError,
   BlockedError,
   handleError,
 } from '../../src/errors.js';
@@ -78,6 +79,19 @@ describe('error classes', () => {
     const err = new ProfileError('profile not found');
     expect(err.code).toBe(8);
     expect(err.hint).toContain('profile list');
+  });
+
+  it('PersistenceError should preserve partial target results', () => {
+    const err = new PersistenceError('save failed', {
+      results: { profile: null, session: { name: 'login' } },
+      failures: [{ target: 'profile', name: 'work' }],
+      snapshot: { cookies: [{ name: 'sid', value: 'super-secret' }] },
+      snapshotMetadata: { cookieCount: 1 },
+    });
+    expect(err.code).toBe(8);
+    expect(err.results.session.name).toBe('login');
+    expect(err.failures).toHaveLength(1);
+    expect(JSON.stringify(err)).not.toContain('super-secret');
   });
 
   it('BlockedError should include engine name', () => {

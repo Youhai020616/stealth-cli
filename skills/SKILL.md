@@ -11,6 +11,7 @@ Anti-detection browser CLI powered by Camoufox. Browse the web, search, extract 
 - User needs to monitor a page for changes
 - User needs to extract structured data (links, images, meta tags)
 - User needs to crawl a site with anti-detection
+- User needs a human to complete login, CAPTCHA, 2FA, or OAuth in a persistent profile
 
 ## Prerequisites
 
@@ -36,6 +37,20 @@ stealth browse https://example.com --proxy http://user:pass@host:port
 # With saved profile identity
 stealth browse https://example.com --profile us-desktop
 ```
+
+### Human-assisted authentication
+
+```bash
+# The browser is headed, ignores stdin, and stays alive until all windows close.
+# Cookies are checkpointed to the profile every second.
+stealth profile create work --preset us-laptop
+stealth open https://example.com/login --profile work
+
+# Persist a named session as well as the profile
+stealth open --url https://example.com/login --profile work --session login-flow
+```
+
+Use `open`, not `browse --no-headless`, for CAPTCHA, 2FA, OAuth consent, or any flow where a human needs time to interact. `open` always bypasses the daemon. If profile and session are combined, profile cookies are canonical and a session linked to another profile is rejected. If the browser process terminates before the final live save, the latest durable checkpoint is retained.
 
 ### Screenshot
 
@@ -155,8 +170,11 @@ stealth profile create random1 --random
 # List profiles
 stealth profile list
 
-# Use profile (auto-saves cookies on exit)
+# One-shot command (auto-saves cookies before it closes)
 stealth browse https://example.com --profile work
+
+# Human login flow (periodic checkpoints + final save on window close)
+stealth open https://example.com/login --profile work
 
 # Available presets: us-desktop, us-laptop, uk-desktop, de-desktop,
 #   jp-desktop, cn-desktop, mobile-ios, mobile-android

@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D20-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-151%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-201%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -23,7 +23,7 @@ Headless Chrome gets fingerprinted. Playwright gets blocked. Stealth plugins bec
 
 **stealth-cli** uses [Camoufox](https://camoufox.com) — a Firefox fork that patches fingerprint generation at the **C++ implementation level**. No JavaScript shims, no wrappers, no tells. The browser reports spoofed values natively.
 
-Wrap that in a developer-friendly CLI with 16 commands, and you get a tool that both humans and AI agents can use.
+Wrap that in a developer-friendly CLI with 17 commands, and you get a tool that both humans and AI agents can use.
 
 ### How it compares
 
@@ -62,6 +62,7 @@ stealth screenshot https://example.com -o page.png          # Screenshot
 stealth search google "best coffee beans" -f json           # Search Google
 stealth extract https://example.com --links                 # Extract links
 stealth crawl https://example.com -d 2 -l 50 -o out.jsonl  # Crawl
+stealth open https://example.com --profile work              # Human login flow
 stealth interactive --url https://example.com               # REPL mode
 ```
 
@@ -89,7 +90,7 @@ No JavaScript shims. No detectable wrappers. The browser natively reports spoofe
 
 ## Commands
 
-### Core (11)
+### Core (12)
 
 | Command | Description |
 |---------|-------------|
@@ -98,7 +99,8 @@ No JavaScript shims. No detectable wrappers. The browser natively reports spoofe
 | `search <engine> <query>` | Search 14 engines with anti-detection |
 | `extract <url>` | Extract links, images, meta, headings, CSS selectors |
 | `crawl <url>` | Recursive crawling with depth/filter/delay control |
-| `interactive` | REPL with 20+ commands (goto, click, type, eval...) |
+| `open [url]` | Headed browser for human authentication; exits when all windows close |
+| `interactive` | Stdin-driven REPL with 20+ commands (goto, click, type, eval...) |
 | `pdf <url>` | Save page as PDF |
 | `batch <file>` | Batch process URLs from file |
 | `monitor <url>` | Watch for changes (price drops, stock alerts) |
@@ -173,10 +175,24 @@ stealth monitor https://shop.com/item --contains "In Stock"
 stealth monitor https://example.com --not-contains "Sold Out"
 ```
 
+### Headed Browser for Human Authentication
+
+```bash
+# Create the identity once, then open a browser that lives until its windows close
+stealth profile create work --preset us-laptop
+stealth open https://example.com/login --profile work
+
+# Named sessions can be checkpointed at the same time
+stealth open --url https://example.com/login --profile work --session login-flow
+```
+
+`open` is always headed and always uses a direct browser, even when the daemon is running. It ignores stdin, checkpoints cookies every second, performs a final live save when the last page closes, and gracefully handles `SIGHUP`, `SIGINT`, and `SIGTERM` on POSIX systems. If the browser process exits before a final live capture, the latest durable checkpoint is retained and a warning is printed.
+
 ### Interactive REPL
 
 ```bash
 stealth interactive --url https://example.com
+stealth interactive --no-headless --profile work --session debugging
 
 stealth> goto https://google.com
 stealth> click "button.submit"
@@ -214,6 +230,9 @@ stealth profile create rand1 --random
 
 stealth browse https://example.com --profile work
 # → Fingerprint: Windows, en-US, America/New_York
+
+# Human-assisted login; cookies are checkpointed while the browser is open
+stealth open https://example.com/login --profile work
 ```
 
 **8 presets:** `us-desktop` · `us-laptop` · `uk-desktop` · `de-desktop` · `jp-desktop` · `cn-desktop` · `mobile-ios` · `mobile-android`
@@ -227,6 +246,10 @@ stealth browse https://example.com --session my-task --profile work
 stealth browse https://other.com --session my-task
 # → Auto-restores cookies and last URL
 ```
+
+When `--profile` and `--session` are combined, the profile is the canonical cookie source and the session restores URL/history metadata. A session already linked to a different profile is rejected instead of merging two identities.
+
+Profile and session JSON files contain authentication material. Writes are atomic; directories use owner-only permissions (`0700`) and files use `0600` on supported platforms. A hard browser crash can only preserve state captured by the most recent checkpoint; `open` defaults to a one-second interval.
 
 ### Proxy Pool
 
@@ -354,7 +377,7 @@ Exit codes: `0` success · `3` browser launch · `4` navigation/blocked · `5` e
 
 ## Common Options
 
-Available on all core commands:
+Option availability varies by command; run `stealth <command> --help` for the exact set.
 
 | Option | Description |
 |--------|-------------|
@@ -365,16 +388,17 @@ Available on all core commands:
 | `--cookies <file>` | Import Netscape-format cookie file |
 | `--humanize` | Simulate human behavior |
 | `--retries <n>` | Max retries on failure |
-| `--no-headless` | Show browser window |
+| `--no-headless` | Show browser window on commands that default to headless |
+| `--checkpoint-interval <ms>` | `open` authentication-state checkpoint interval (default: 1000) |
 | `-f, --format` | Output format: text, json, jsonl, snapshot, markdown |
 
 ## Project Stats
 
 ```
 Version:     0.6.1
-Commands:    16
-Tests:       151 passing (18 test files)
-Source:      5,900 lines (39 source files)
+Commands:    17
+Tests:       201 passing (23 test files)
+Source:      8,066 lines (45 JavaScript files under `src/`)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)

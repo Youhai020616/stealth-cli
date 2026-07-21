@@ -15,6 +15,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { ProfileError } from './errors.js';
+import { writeJsonAtomic } from './utils/json-file.js';
 
 const PROFILES_DIR = path.join(os.homedir(), '.stealth', 'profiles');
 
@@ -105,7 +106,10 @@ const LOCALES = [
  * Ensure profiles directory exists
  */
 function ensureDir() {
-  fs.mkdirSync(PROFILES_DIR, { recursive: true });
+  fs.mkdirSync(PROFILES_DIR, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(PROFILES_DIR, 0o700);
+  } catch {}
 }
 
 /**
@@ -183,7 +187,7 @@ export function createProfile(name, opts = {}) {
     useCount: 0,
   };
 
-  fs.writeFileSync(filePath, JSON.stringify(profile, null, 2));
+  writeJsonAtomic(filePath, profile);
   return profile;
 }
 
@@ -191,13 +195,30 @@ export function createProfile(name, opts = {}) {
  * Load a profile by name
  */
 export function loadProfile(name) {
+  ensureDir();
   const filePath = profilePath(name);
 
   if (!fs.existsSync(filePath)) {
     throw new ProfileError(`Profile "${name}" not found`, { hint: `Create with: stealth profile create ${name}` });
   }
 
-  return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  let profile;
+  try {
+    profile = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch (error) {
+    throw new ProfileError(`Profile "${name}" is corrupted`, {
+      hint: `Delete and recreate it: stealth profile delete ${name}`,
+      cause: error,
+    });
+  }
+
+  if (!profile || typeof profile !== 'object' || !profile.fingerprint) {
+    throw new ProfileError(`Profile "${name}" has an invalid format`, {
+      hint: `Delete and recreate it: stealth profile delete ${name}`,
+    });
+  }
+
+  return profile;
 }
 
 /**
@@ -206,7 +227,7 @@ export function loadProfile(name) {
 export function saveProfile(name, profile) {
   ensureDir();
   const filePath = profilePath(name);
-  fs.writeFileSync(filePath, JSON.stringify(profile, null, 2));
+  writeJsonAtomic(filePath, profile);
 }
 
 /**
@@ -221,35 +242,47 @@ export function touchProfile(name) {
 }
 
 /**
- * Save cookies to profile (auto-called when browser closes)
+ * Persist an already-captured cookie snapshot to a profile.
+ *
+ * @param {string} name
+ * @param {Array<object>} cookies
+ * @returns {number} Number of cookies in the snapshot
  */
-export async function saveCookiesToProfile(name, context) {
-  try {
-    const profile = loadProfile(name);
-    const cookies = await context.cookies();
+export function saveProfileCookies(name, cookies) {
+  if (!Array.isArray(cookies)) {
+    throw new ProfileError(`Cannot save profile "${name}": invalid cookie snapshot`);
+  }
+
+  const profile = loadProfile(name);
+  const changed = JSON.stringify(profile.cookies || []) !== JSON.stringify(cookies);
+
+  if (changed) {
     profile.cookies = cookies;
     profile.lastUsed = new Date().toISOString();
     saveProfile(name, profile);
-    return cookies.length;
-  } catch {
-    return 0;
   }
+
+  return cookies.length;
 }
 
 /**
- * Load cookies from profile into browser context
+ * Capture and save cookies to a profile.
+ */
+export async function saveCookiesToProfile(name, context) {
+  const cookies = await context.cookies();
+  return saveProfileCookies(name, cookies);
+}
+
+/**
+ * Load cookies from profile into browser context.
  */
 export async function loadCookiesFromProfile(name, context) {
-  try {
-    const profile = loadProfile(name);
-    if (profile.cookies && profile.cookies.length > 0) {
-      await context.addCookies(profile.cookies);
-      return profile.cookies.length;
-    }
-    return 0;
-  } catch {
-    return 0;
+  const profile = loadProfile(name);
+  if (profile.cookies && profile.cookies.length > 0) {
+    await context.addCookies(profile.cookies);
+    return profile.cookies.length;
   }
+  return 0;
 }
 
 /**

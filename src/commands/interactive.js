@@ -20,6 +20,10 @@ import {
   clickRef,
   typeRef,
 } from "../browser.js";
+import {
+  createBrowserLifecycle,
+  createLaunchSignalGuard,
+} from "../browser-lifecycle.js";
 import { expandMacro, getSupportedEngines } from "../macros.js";
 import {
   humanClick,
@@ -29,7 +33,7 @@ import {
 } from "../humanize.js";
 import { log } from "../output.js";
 import { resolveOpts } from "../utils/resolve-opts.js";
-import { handleError } from "../errors.js";
+import { StealthError, handleError } from "../errors.js";
 
 const HELP_TEXT = `
 ${chalk.bold("Navigation:")}
@@ -73,16 +77,41 @@ export function registerInteractive(program) {
     .option("--cookies <file>", "Load cookies from Netscape-format file")
     .option("--no-headless", "Show browser window")
     .option("--url <url>", "Initial URL to open")
+    .option("--profile <name>", "Use a browser profile")
+    .option("--session <name>", "Use/restore a named session")
     .action(async (opts) => {
       opts = resolveOpts(opts);
       const spinner = ora("Launching stealth browser...").start();
       let handle;
+      let lifecycle;
+      let rl;
+      let cleanupIncomplete = false;
+      let lastCheckpointWarning = null;
+      const signalGuard = createLaunchSignalGuard();
 
       try {
         handle = await launchBrowser({
           headless: opts.headless,
           proxy: opts.proxy,
+          profile: opts.profile,
+          session: opts.session,
+          forceDirect: opts.headless === false || Boolean(opts.cookies),
+          handleSignals: false,
         });
+
+        if (!handle.isDaemon) {
+          lifecycle = createBrowserLifecycle(handle, {
+            onCheckpointError(error) {
+              if (error.message !== lastCheckpointWarning) {
+                lastCheckpointWarning = error.message;
+                log.warn(`State checkpoint failed; it will be retried: ${error.message}`);
+              }
+            },
+          });
+          signalGuard.transferTo(lifecycle);
+        } else {
+          signalGuard.dispose();
+        }
 
         if (opts.cookies && !handle.isDaemon) {
           const { loadCookies } = await import("../cookies.js");
@@ -107,7 +136,7 @@ export function registerInteractive(program) {
           log.info(`Current page: ${currentUrl}`);
         }
 
-        const rl = createInterface({
+        rl = createInterface({
           input: process.stdin,
           output: process.stderr,
           prompt: chalk.green("stealth> "),
@@ -382,18 +411,62 @@ export function registerInteractive(program) {
             log.error(`${err.message}`);
           }
 
-          rl.prompt();
+          if (!lifecycle || lifecycle.phase === "running") rl.prompt();
         });
 
-        rl.on("close", async () => {
+        const readlineClosed = new Promise((resolve) => rl.once("close", resolve));
+
+        if (lifecycle) {
+          void readlineClosed
+            .then(() => lifecycle.requestExit("readline-closed"))
+            .catch(() => {});
+
+          const result = await lifecycle.wait();
+          rl.close();
+          await readlineClosed;
+
+          if (result.usedCheckpointFallback && result.persistedAt) {
+            log.warn(
+              `Browser closed before a final live snapshot; using checkpoint from ${result.persistedAt}`,
+            );
+          }
+          if (result.cleanupErrors?.length > 0) {
+            cleanupIncomplete = true;
+            const targets = result.cleanupErrors.map(({ target }) => target).join(", ");
+            log.warn(`Browser cleanup was incomplete (${targets})`);
+          }
+          if (result.exitCode) process.exitCode = result.exitCode;
+        } else {
+          await readlineClosed;
           await closeBrowser(handle);
+        }
+
+        if (cleanupIncomplete) {
+          log.warn("Interactive browser exited with cleanup errors");
+        } else {
           log.success("Bye! 🦊");
-          process.exit(0);
-        });
+        }
       } catch (err) {
         spinner.stop();
-        if (handle) await closeBrowser(handle);
-        handleError(err, { log });
+        signalGuard.dispose();
+        if (rl) rl.close();
+        if (lifecycle) {
+          try {
+            await lifecycle.requestExit("command-error");
+          } catch {}
+        } else if (handle) {
+          const cleanup = await closeBrowser(handle);
+          if (cleanup.cleanupErrors.length > 0) {
+            const targets = cleanup.cleanupErrors.map(({ target }) => target).join(", ");
+            log.warn(`Browser cleanup after launch failure was incomplete (${targets})`);
+          }
+        }
+        const handledError = signalGuard.pendingSignal && !lifecycle
+          ? new StealthError(`Interrupted by ${signalGuard.pendingSignal}`, {
+            code: signalGuard.exitCode,
+          })
+          : err;
+        process.exitCode = handleError(handledError, { log, exit: false });
       }
     });
 }

@@ -90,6 +90,21 @@ export class ProfileError extends StealthError {
   }
 }
 
+export class PersistenceError extends StealthError {
+  constructor(message, opts = {}) {
+    super(message, {
+      code: 8,
+      hint: opts.hint || 'Authentication state was not fully saved; keep the browser open and retry',
+      ...opts,
+    });
+    this.name = 'PersistenceError';
+    this.results = opts.results || null;
+    this.failures = opts.failures || [];
+    this.snapshotMetadata = opts.snapshotMetadata || null;
+    this.cleanupFailures = opts.cleanupFailures || [];
+  }
+}
+
 export class BlockedError extends StealthError {
   constructor(engine, url) {
     super(`${engine} detected automation and blocked the request`, {

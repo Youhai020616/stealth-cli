@@ -13,10 +13,14 @@ import { daemonNavigate, daemonRequest } from "./client.js";
 import {
   loadProfile,
   touchProfile,
-  saveCookiesToProfile,
+  saveProfileCookies,
   loadCookiesFromProfile,
 } from "./profiles.js";
-import { restoreSession, captureSession } from "./session.js";
+import {
+  getSession,
+  restoreSession,
+  saveSessionSnapshot,
+} from "./session.js";
 import { getNextProxy } from "./proxy-pool.js";
 import {
   getHostOS,
@@ -24,12 +28,27 @@ import {
   extractPageText,
 } from "./utils/browser-factory.js";
 import { log } from "./output.js";
-import { BrowserLaunchError, NavigationError } from "./errors.js";
+import {
+  BrowserLaunchError,
+  NavigationError,
+  PersistenceError,
+  ProfileError,
+} from "./errors.js";
 import { buildA11yTree, clickByRef, typeByRef, hoverByRef } from "./a11y.js";
+
+const closeOperations = new WeakMap();
 
 /**
  * Build proxy configuration
  */
+function describeUrlForLog(value) {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return 'saved session URL';
+  }
+}
+
 function buildProxy(proxyStr) {
   if (!proxyStr) return null;
 
@@ -65,6 +84,8 @@ function buildProxy(proxyStr) {
  * @param {string} [opts.timezone] - Timezone ID
  * @param {object} [opts.viewport] - { width, height }
  * @param {boolean} [opts.humanize] - Enable human behavior simulation
+ * @param {boolean} [opts.forceDirect=false] - Never route through the daemon
+ * @param {boolean} [opts.handleSignals=true] - Let Playwright own process signal handling
  * @returns {Promise<{ browser, context, page, isDaemon, _meta }>}
  */
 export async function launchBrowser(opts = {}) {
@@ -78,33 +99,52 @@ export async function launchBrowser(opts = {}) {
     timezone = "America/Los_Angeles",
     viewport = { width: 1280, height: 720 },
     humanize = false,
+    forceDirect = false,
+    handleSignals = true,
   } = opts;
 
   // --- Load profile if specified ---
   let profileData = null;
   if (profileName) {
-    try {
-      profileData = loadProfile(profileName);
-      const fp = profileData.fingerprint;
-      locale = fp.locale || locale;
-      timezone = fp.timezone || timezone;
-      viewport = fp.viewport || viewport;
-      if (profileData.proxy && !proxyStr) {
-        proxyStr = profileData.proxy;
-      }
-      touchProfile(profileName);
-    } catch (err) {
-      log.warn(`Profile "${profileName}" failed to load: ${err.message}`);
+    profileData = loadProfile(profileName);
+    const fp = profileData.fingerprint;
+    locale = fp.locale || locale;
+    timezone = fp.timezone || timezone;
+    viewport = fp.viewport || viewport;
+    if (profileData.proxy && !proxyStr) {
+      proxyStr = profileData.proxy;
     }
   }
+
+  // Validate profile/session identity before launching a browser. A linked
+  // session must never merge authentication state from another profile.
+  if (profileName && sessionName) {
+    const session = getSession(sessionName);
+    if (session.profile && session.profile !== profileName) {
+      throw new ProfileError(
+        `Session "${sessionName}" belongs to profile "${session.profile}", not "${profileName}"`,
+        { hint: 'Use the linked profile or choose a different --session name' },
+      );
+    }
+  }
+
+  if (profileName) touchProfile(profileName);
 
   // --- Proxy pool rotation ---
   if (proxyRotate && !proxyStr) {
     proxyStr = getNextProxy();
   }
 
-  // Check if daemon is available (skip if proxy/profile/session needed)
-  if (!proxyStr && !profileName && !sessionName && isDaemonRunning()) {
+  // A headed or stateful browser requires its own local context. Reusing a
+  // daemon here would ignore the requested window and persistence semantics.
+  if (
+    !forceDirect &&
+    headless !== false &&
+    !proxyStr &&
+    !profileName &&
+    !sessionName &&
+    isDaemonRunning()
+  ) {
     return {
       browser: null,
       context: null,
@@ -123,6 +163,7 @@ export async function launchBrowser(opts = {}) {
       headless,
       os: hostOS,
       proxy: proxy || undefined,
+      handleSignals,
     });
   } catch (err) {
     throw new BrowserLaunchError(err.message, { cause: err });
@@ -143,71 +184,270 @@ export async function launchBrowser(opts = {}) {
     contextOptions.geolocation = geo;
   }
 
-  const context = await browser.newContext(contextOptions);
-
-  // --- Restore profile cookies ---
-  if (profileName) {
-    await loadCookiesFromProfile(profileName, context);
-  }
-
-  // --- Restore session ---
+  let context;
+  let page;
   let sessionInfo = null;
-  if (sessionName) {
-    sessionInfo = await restoreSession(sessionName, context);
-  }
 
-  const page = await context.newPage();
+  try {
+    context = await browser.newContext(contextOptions);
 
-  // If session had a last URL, navigate to it
-  if (sessionInfo?.lastUrl && sessionInfo.lastUrl !== "about:blank") {
-    try {
-      await page.goto(sessionInfo.lastUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 15000,
-      });
-    } catch (err) {
-      log.warn(
-        `Session URL restore failed (${sessionInfo.lastUrl}): ${err.message}`,
-      );
+    if (profileName) {
+      try {
+        await loadCookiesFromProfile(profileName, context);
+      } catch (cause) {
+        throw new ProfileError(`Failed to restore profile "${profileName}"`, {
+          hint: 'The saved profile cookies may be invalid',
+          cause,
+        });
+      }
     }
+
+    if (sessionName) {
+      try {
+        sessionInfo = await restoreSession(sessionName, context, {
+          expectedProfile: profileName,
+          restoreCookies: !profileName,
+        });
+      } catch (cause) {
+        throw new ProfileError(`Failed to restore session "${sessionName}"`, {
+          hint: 'Use a new --session name or remove the corrupted session file',
+          cause,
+        });
+      }
+    }
+
+    page = await context.newPage();
+
+    if (sessionInfo?.lastUrl && sessionInfo.lastUrl !== "about:blank") {
+      try {
+        await page.goto(sessionInfo.lastUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 15000,
+        });
+      } catch {
+        log.warn(
+          `Session URL restore failed for ${describeUrlForLog(sessionInfo.lastUrl)}; continuing with a blank page`,
+        );
+      }
+    }
+  } catch (error) {
+    if (context) await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+    if (error instanceof ProfileError) throw error;
+    throw new BrowserLaunchError(`Browser initialization failed: ${error.message}`, {
+      cause: error,
+    });
   }
+
+  let lastKnownUrl = 'about:blank';
+  try {
+    lastKnownUrl = page.url();
+  } catch {}
 
   return {
     browser,
     context,
     page,
     isDaemon: false,
-    _meta: { profileName, sessionName, proxyUrl: proxyStr, sessionInfo },
+    _meta: {
+      profileName,
+      sessionName,
+      proxyUrl: proxyStr,
+      sessionInfo,
+      lastKnownUrl,
+    },
   };
 }
 
 /**
- * Safely close browser and clean up (no-op for daemon mode)
- * Auto-saves profile cookies and session state before closing
+ * Capture browser state while the Playwright context is still connected.
+ * Cookie values remain in-memory and are never included in log messages.
+ *
+ * @param {object} handle
+ * @returns {Promise<{ cookies: Array<object>, lastUrl: string | null, capturedAt: string }>}
  */
-export async function closeBrowser(handle) {
-  const { browser, context, page, isDaemon, _meta } = handle;
+export async function captureBrowserState(handle) {
+  const { browser, context, page, isDaemon, _meta } = handle || {};
 
-  if (isDaemon) return;
-
-  try {
-    // Auto-save profile cookies
-    if (_meta?.profileName && context) {
-      await saveCookiesToProfile(_meta.profileName, context).catch(() => {});
-    }
-
-    // Auto-save session
-    if (_meta?.sessionName && context && page) {
-      await captureSession(_meta.sessionName, context, page, {
-        profile: _meta.profileName,
-      }).catch(() => {});
-    }
-
-    if (context) await context.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
-  } catch {
-    // Ignore cleanup errors
+  if (isDaemon || !context) {
+    throw new PersistenceError('Cannot capture state from a daemon browser');
   }
+  if (typeof browser?.isConnected === 'function' && !browser.isConnected()) {
+    throw new PersistenceError('Cannot capture state after the browser disconnected');
+  }
+
+  let lastUrl = _meta?.lastKnownUrl || null;
+  const pages = typeof context.pages === 'function' ? context.pages() : [];
+  const candidates = [page, ...pages].filter(Boolean).reverse();
+  for (const candidate of candidates) {
+    try {
+      if (typeof candidate.isClosed === 'function' && candidate.isClosed()) continue;
+      const candidateUrl = candidate.url();
+      if (candidateUrl && candidateUrl !== 'about:blank') {
+        lastUrl = candidateUrl;
+        break;
+      }
+      if (!lastUrl && candidateUrl) lastUrl = candidateUrl;
+    } catch {}
+  }
+
+  if (_meta && lastUrl) _meta.lastKnownUrl = lastUrl;
+
+  let cookies;
+  try {
+    cookies = await context.cookies();
+  } catch (cause) {
+    throw new PersistenceError('Failed to capture browser authentication state', {
+      cause,
+    });
+  }
+
+  return {
+    cookies,
+    lastUrl,
+    capturedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Write a previously captured snapshot to every configured persistence target.
+ * Profile and session writes are attempted independently.
+ *
+ * @param {object} handle
+ * @param {{ cookies: Array<object>, lastUrl: string | null, capturedAt: string }} snapshot
+ */
+export async function writeBrowserStateSnapshot(handle, snapshot) {
+  const { _meta = {}, isDaemon } = handle || {};
+  const { profileName, sessionName } = _meta;
+  const results = { profile: null, session: null };
+  const failures = [];
+
+  if (isDaemon || (!profileName && !sessionName)) {
+    return { snapshot, results };
+  }
+
+  if (profileName) {
+    try {
+      results.profile = {
+        name: profileName,
+        cookies: saveProfileCookies(profileName, snapshot.cookies),
+      };
+    } catch (error) {
+      failures.push({ target: 'profile', name: profileName, error });
+    }
+  }
+
+  if (sessionName) {
+    try {
+      const session = saveSessionSnapshot(sessionName, snapshot, {
+        profile: profileName,
+      });
+      results.session = {
+        name: sessionName,
+        cookies: session.cookies.length,
+        lastUrl: session.lastUrl,
+      };
+    } catch (error) {
+      failures.push({ target: 'session', name: sessionName, error });
+    }
+  }
+
+  if (failures.length > 0) {
+    const failedTargets = failures.map(({ target, name }) => `${target} "${name}"`).join(', ');
+    throw new PersistenceError(`Failed to save browser state to ${failedTargets}`, {
+      cause: failures[0].error,
+      failures,
+      results,
+      snapshotMetadata: {
+        capturedAt: snapshot.capturedAt,
+        cookieCount: snapshot.cookies.length,
+      },
+    });
+  }
+
+  return { snapshot, results };
+}
+
+/**
+ * Capture current state once and persist the same snapshot to all targets.
+ */
+export async function persistBrowserState(handle) {
+  const { profileName, sessionName } = handle?._meta || {};
+  if (handle?.isDaemon || (!profileName && !sessionName)) {
+    return {
+      snapshot: null,
+      results: { profile: null, session: null },
+    };
+  }
+
+  const snapshot = await captureBrowserState(handle);
+  return writeBrowserStateSnapshot(handle, snapshot);
+}
+
+/**
+ * Safely close a browser exactly once.
+ *
+ * Persistence is best-effort by default for SDK compatibility. Callers that
+ * need a strict guarantee should use persistBrowserState() first and then call
+ * closeBrowser(handle, { persist: false }).
+ *
+ * @param {object} handle
+ * @param {object} [opts]
+ * @param {boolean} [opts.persist=true]
+ * @param {boolean} [opts.strict=false]
+ */
+export async function closeBrowser(handle, opts = {}) {
+  const { persist = true, strict = false } = opts;
+
+  if (!handle || handle.isDaemon) {
+    return { persistence: null, persistenceError: null, cleanupErrors: [] };
+  }
+
+  let closeOperation = closeOperations.get(handle);
+  if (!closeOperation) {
+    closeOperation = (async () => {
+      const { browser, context } = handle;
+      let persistence = null;
+      let persistenceError = null;
+      const cleanupErrors = [];
+
+      if (persist) {
+        try {
+          persistence = await persistBrowserState(handle);
+        } catch (error) {
+          persistenceError = error;
+          log.warn(`Browser state was not fully saved: ${error.message}`);
+        }
+      }
+
+      if (context) {
+        try {
+          await context.close();
+        } catch (error) {
+          cleanupErrors.push({ target: 'context', error });
+        }
+      }
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (error) {
+          cleanupErrors.push({ target: 'browser', error });
+        }
+      }
+
+      return { persistence, persistenceError, cleanupErrors };
+    })();
+    closeOperations.set(handle, closeOperation);
+  }
+
+  const result = await closeOperation;
+  if (strict && result.persistenceError) throw result.persistenceError;
+  if (strict && result.cleanupErrors.length > 0) {
+    throw new BrowserLaunchError('Browser cleanup failed', {
+      cause: result.cleanupErrors[0].error,
+    });
+  }
+  return result;
 }
 
 /**
@@ -236,6 +476,7 @@ export async function navigate(handle, url, opts = {}) {
         },
         { maxRetries: retries, label: `navigate(daemon)` },
       );
+      if (handle._meta) handle._meta.lastKnownUrl = result;
       return result;
     }
 
@@ -250,6 +491,7 @@ export async function navigate(handle, url, opts = {}) {
       await postNavigationBehavior(handle.page);
     }
 
+    if (handle._meta) handle._meta.lastKnownUrl = finalUrl;
     return finalUrl;
   } catch (err) {
     if (err instanceof NavigationError) throw err;

@@ -1,10 +1,15 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   createProfile, loadProfile, deleteProfile,
-  listProfiles, getPresets,
+  listProfiles, getPresets, saveCookiesToProfile,
+  saveProfileCookies, loadCookiesFromProfile,
 } from '../../src/profiles.js';
 
 const TEST_PROFILE = '__vitest_test_profile__';
+const PROFILES_DIR = path.join(os.homedir(), '.stealth', 'profiles');
 
 afterEach(() => {
   try { deleteProfile(TEST_PROFILE); } catch {}
@@ -18,6 +23,9 @@ describe('profiles', () => {
     expect(p.fingerprint.os).toBe('windows');
     expect(p.fingerprint.viewport.width).toBe(1920);
     expect(p.useCount).toBe(0);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(PROFILES_DIR).mode & 0o777).toBe(0o700);
+    }
   });
 
   it('should create a random profile', () => {
@@ -34,6 +42,15 @@ describe('profiles', () => {
     const loaded = loadProfile(TEST_PROFILE);
     expect(loaded.name).toBe(TEST_PROFILE);
     expect(loaded.fingerprint.locale).toBe('ja-JP');
+  });
+
+  it('should harden a legacy profile directory when loading through the SDK', () => {
+    createProfile(TEST_PROFILE, { preset: 'us-desktop' });
+    if (process.platform !== 'win32') {
+      fs.chmodSync(PROFILES_DIR, 0o755);
+      loadProfile(TEST_PROFILE);
+      expect(fs.statSync(PROFILES_DIR).mode & 0o777).toBe(0o700);
+    }
   });
 
   it('should throw when profile not found', () => {
@@ -76,5 +93,29 @@ describe('profiles', () => {
     expect(p.proxy).toBe('http://proxy:8080');
     const loaded = loadProfile(TEST_PROFILE);
     expect(loaded.proxy).toBe('http://proxy:8080');
+  });
+
+  it('should persist and restore a captured cookie snapshot', async () => {
+    const cookies = [{ name: 'sid', value: '123', domain: 'example.com', path: '/' }];
+    createProfile(TEST_PROFILE, { preset: 'us-desktop' });
+    const context = {
+      cookies: vi.fn().mockResolvedValue(cookies),
+      addCookies: vi.fn().mockResolvedValue(undefined),
+    };
+
+    expect(await saveCookiesToProfile(TEST_PROFILE, context)).toBe(1);
+    expect(saveProfileCookies(TEST_PROFILE, cookies)).toBe(1);
+    expect(await loadCookiesFromProfile(TEST_PROFILE, context)).toBe(1);
+    expect(context.addCookies).toHaveBeenCalledWith(cookies);
+    expect(loadProfile(TEST_PROFILE).cookies).toEqual(cookies);
+  });
+
+  it('should surface cookie capture failures instead of returning false success', async () => {
+    createProfile(TEST_PROFILE, { preset: 'us-desktop' });
+    const context = {
+      cookies: vi.fn().mockRejectedValue(new Error('browser disconnected')),
+    };
+
+    await expect(saveCookiesToProfile(TEST_PROFILE, context)).rejects.toThrow('browser disconnected');
   });
 });

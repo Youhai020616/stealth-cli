@@ -10,7 +10,8 @@ IMPORTANT: `camoufox-js` is a niche library with limited training data. Always r
 bin/stealth.js           — CLI entry (Commander)
 src/
   index.js               — SDK public API (re-exports all modules)
-  browser.js             — Core: launch/close/navigate via camoufox-js
+  browser.js             — Core: launch/close/navigate + state snapshots via camoufox-js
+  browser-lifecycle.js   — Headed browser lifetime, signals, and durable checkpoints
   daemon.js              — Background browser server (unix socket ~/.stealth/daemon.sock)
   client.js              — HTTP client for daemon communication
   daemon-entry.js        — Daemon process entrypoint
@@ -27,6 +28,7 @@ src/
   mcp-server.js          — MCP server (stdio JSON-RPC) for AI agents
   utils/
     browser-factory.js   — Shared browser bootstrap (getHostOS, createBrowser, TEXT_EXTRACT_SCRIPT)
+    json-file.js         — Atomic owner-only writes for profile/session auth state
     resolve-opts.js      — Merge global config + CLI opts (used by all core commands)
   extractors/
     index.js             — Extractor registry (by engine name or URL)
@@ -46,7 +48,8 @@ tests/
 ## Key Architecture Decisions
 
 - **Two modes**: Direct mode (new browser per command) vs Daemon mode (reuse background browser via unix socket HTTP server)
-- `browser.js` detects daemon automatically — if running, all commands route through HTTP client; otherwise launch a new browser
+- `browser.js` detects daemon automatically; headed, stateful, proxied, or `forceDirect` launches always bypass it
+- `open` and direct `interactive` own SIGINT/SIGTERM/SIGHUP handling so state is checkpointed before shutdown
 - All browser launch goes through `camoufox-js` `launchOptions()` → `playwright-core` `firefox.launch()`. Never use `chromium.launch()` or `playwright` (non-core)
 - Daemon socket: `~/.stealth/daemon.sock`, PID: `~/.stealth/daemon.pid`
 

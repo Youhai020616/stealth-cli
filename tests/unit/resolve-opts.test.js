@@ -87,6 +87,7 @@ describe('resolveOpts', () => {
       limit: '50',
       width: '1920',
       height: '1080',
+      checkpointInterval: '1000',
     });
     expect(opts.timeout).toBe(5000);
     expect(opts.delay).toBe(2000);
@@ -95,6 +96,7 @@ describe('resolveOpts', () => {
     expect(opts.limit).toBe(50);
     expect(opts.width).toBe(1920);
     expect(opts.height).toBe(1080);
+    expect(opts.checkpointInterval).toBe(1000);
   });
 
   it('should pass through unknown CLI opts untouched', () => {

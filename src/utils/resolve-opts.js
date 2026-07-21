@@ -35,7 +35,7 @@ const CONFIG_TO_CLI = {
 // Numeric fields that Commander passes as strings
 const NUMERIC_KEYS = [
   'retries', 'timeout', 'delay', 'viewportWidth', 'viewportHeight',
-  'wait', 'depth', 'limit', 'interval', 'count', 'port', 'num', 'width', 'height',
+  'wait', 'depth', 'limit', 'interval', 'checkpointInterval', 'count', 'port', 'num', 'width', 'height',
 ];
 
 /**
