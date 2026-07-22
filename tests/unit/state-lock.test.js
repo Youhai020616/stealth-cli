@@ -15,6 +15,8 @@ import { getStateLocksDir, getStealthHome } from '../../src/utils/storage-paths.
 const ORIGINAL_STEALTH_HOME = process.env.STEALTH_HOME;
 const TEST_STEALTH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-state-lock-'));
 const EXTRA_TEST_HOMES = new Set();
+const SPAWNED_CHILDREN = new Set();
+const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
 const FIXTURES_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
@@ -28,61 +30,72 @@ function stateLockPath(kind, name, root = getStealthHome()) {
   return path.join(root, 'locks', `${digest}.lock`);
 }
 
-function staleLockRemovalHint(directoryPath) {
-  return `After confirming no stealth process is using this state, remove this exact lock directory: ${directoryPath}`;
+function journalRemovalHint(journalPath) {
+  return `After confirming no stealth process is using this state, remove this exact lock journal file: ${journalPath}`;
+}
+
+function journalMaintenanceHint(journalPath) {
+  return `After confirming no stealth process is using this state, archive or remove this exact lock journal file before retrying: ${journalPath}`;
 }
 
 function currentUserId() {
   return typeof process.getuid === 'function' ? process.getuid() : null;
 }
 
-function onlyOwnerPath(directoryPath) {
-  const entries = fs.readdirSync(directoryPath);
-  expect(entries).toHaveLength(1);
-  return path.join(directoryPath, entries[0]);
-}
-
-function readOwner(directoryPath) {
-  const ownerPath = onlyOwnerPath(directoryPath);
+function claimRecord(kind, name, opts = {}) {
+  const root = path.resolve(opts.root || getStealthHome());
   return {
-    ownerPath,
-    contents: fs.readFileSync(ownerPath, 'utf8'),
-    metadata: JSON.parse(fs.readFileSync(ownerPath, 'utf8')),
-  };
-}
-
-function createLockGeneration(kind, name, opts = {}) {
-  const root = opts.root || getStealthHome();
-  const directoryPath = stateLockPath(kind, name, root);
-  const token = opts.token || crypto.randomUUID();
-  const ownerPath = path.join(directoryPath, `${token}.owner.json`);
-  const metadata = {
-    token,
+    op: 'claim',
+    token: opts.token || crypto.randomUUID(),
     root,
     kind,
     name: name.toLowerCase(),
-    uid: currentUserId(),
-    pid: process.pid,
-    hostname: os.hostname(),
-    createdAt: new Date().toISOString(),
-    ...opts.metadata,
+    pid: opts.pid ?? process.pid,
+    hostname: opts.hostname || os.hostname(),
+    createdAt: opts.createdAt || new Date().toISOString(),
+    ...opts.overrides,
   };
+}
 
-  fs.mkdirSync(path.dirname(directoryPath), { recursive: true, mode: 0o700 });
-  fs.mkdirSync(directoryPath, { mode: opts.directoryMode ?? 0o700 });
-  if (opts.ownerType === 'directory') {
-    fs.mkdirSync(ownerPath, { mode: 0o700 });
-  } else if (opts.ownerType === 'symlink') {
-    fs.symlinkSync(opts.symlinkTarget, ownerPath);
-  } else {
-    fs.writeFileSync(
-      ownerPath,
-      opts.contents ?? `${JSON.stringify(metadata)}\n`,
-      { mode: opts.ownerMode ?? 0o600 },
-    );
+function releaseRecord(token, opts = {}) {
+  return {
+    op: 'release',
+    token,
+    releasedAt: opts.releasedAt || new Date().toISOString(),
+    ...opts.overrides,
+  };
+}
+
+function serializeRecords(records) {
+  return records.map((record) => `${JSON.stringify(record)}\n`).join('');
+}
+
+function writeJournal(kind, name, records, opts = {}) {
+  const root = path.resolve(opts.root || getStealthHome());
+  const journalPath = stateLockPath(kind, name, root);
+  fs.mkdirSync(path.dirname(journalPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    journalPath,
+    opts.contents ?? serializeRecords(records),
+    { mode: opts.mode ?? 0o600 },
+  );
+  return journalPath;
+}
+
+function readJournalRecords(journalPath) {
+  const contents = fs.readFileSync(journalPath, 'utf8');
+  if (contents === '') return [];
+  expect(contents.endsWith('\n')).toBe(true);
+  return contents.slice(0, -1).split('\n').map((line) => JSON.parse(line));
+}
+
+function activeClaims(records) {
+  const active = new Map();
+  for (const record of records) {
+    if (record.op === 'claim') active.set(record.token, record);
+    else if (record.op === 'release') active.delete(record.token);
   }
-
-  return { directoryPath, ownerPath, metadata, token };
+  return [...active.values()];
 }
 
 function temporaryStealthHome(label) {
@@ -91,46 +104,54 @@ function temporaryStealthHome(label) {
   return root;
 }
 
-function startStateLockHolder(kind, name) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [STATE_LOCK_CHILD, kind, name], {
-      cwd: path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..'),
-      env: { ...process.env, STEALTH_HOME: getStealthHome() },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    let ready = false;
-    const exited = new Promise((resolveExit) => {
-      child.once('exit', (code, signal) => resolveExit({ code, signal, stderr }));
-    });
-    const timeout = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`Timed out waiting for ${kind} ${name} lock`));
-    }, 10_000);
+function spawnStateLockContender(kind, name) {
+  const child = spawn(process.execPath, [STATE_LOCK_CHILD, kind, name], {
+    cwd: path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..'),
+    env: { ...process.env, STEALTH_HOME: getStealthHome() },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  SPAWNED_CHILDREN.add(child);
 
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-      if (!ready && stdout.includes('locked')) {
-        ready = true;
-        clearTimeout(timeout);
-        resolve({ child, exited });
-      }
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk;
-    });
-    child.once('error', (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
+  let stdout = '';
+  let stderr = '';
+  let locked = false;
+  let settleOutcome;
+  let rejectOutcome;
+  const outcome = new Promise((resolve, reject) => {
+    settleOutcome = resolve;
+    rejectOutcome = reject;
+  });
+  const exited = new Promise((resolve) => {
     child.once('exit', (code, signal) => {
-      if (!ready) {
-        clearTimeout(timeout);
-        reject(new Error(`Lock holder exited before ready (${code ?? signal}): ${stderr}`));
-      }
+      SPAWNED_CHILDREN.delete(child);
+      resolve({ code, signal, stderr });
+      if (!locked) settleOutcome({ status: 'exited', child, code, signal, stderr });
     });
   });
+  const timeout = setTimeout(() => {
+    child.kill('SIGKILL');
+    rejectOutcome(new Error(`Timed out waiting for ${kind} ${name} contender`));
+  }, 10_000);
+
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+    if (!locked && stdout.includes('locked')) {
+      locked = true;
+      clearTimeout(timeout);
+      settleOutcome({ status: 'locked', child });
+    }
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  child.once('error', (error) => {
+    clearTimeout(timeout);
+    SPAWNED_CHILDREN.delete(child);
+    rejectOutcome(error);
+  });
+  child.once('exit', () => clearTimeout(timeout));
+
+  return { child, outcome, exited };
 }
 
 beforeEach(() => {
@@ -141,6 +162,7 @@ beforeEach(() => {
 
 afterAll(() => {
   vi.restoreAllMocks();
+  for (const child of SPAWNED_CHILDREN) child.kill('SIGKILL');
   if (ORIGINAL_STEALTH_HOME === undefined) delete process.env.STEALTH_HOME;
   else process.env.STEALTH_HOME = ORIGINAL_STEALTH_HOME;
   fs.rmSync(TEST_STEALTH_HOME, { recursive: true, force: true });
@@ -149,19 +171,50 @@ afterAll(() => {
   }
 });
 
-describe('state locks', () => {
-  it('rejects a second writer and allows reuse after an idempotent release', () => {
-    const releaseFirst = acquireStateLocks({ profile: 'work' });
+describe('state lock journals', () => {
+  it('appends claim/release history and reuses the same regular file without deleting it', () => {
+    const unlink = vi.spyOn(fs, 'unlinkSync');
+    const rmdir = vi.spyOn(fs, 'rmdirSync');
+    const journalPath = stateLockPath('profile', 'work');
 
-    expect(() => acquireStateLocks({ profile: 'work' })).toThrow('already in use');
+    const first = acquireStateLocks({ profile: 'Work' });
+    const initialStats = fs.statSync(journalPath);
+    expect(initialStats.isFile()).toBe(true);
+    expect(first.owns('profile', 'work')).toBe(true);
+    expect(readJournalRecords(journalPath)).toEqual([
+      expect.objectContaining({
+        op: 'claim',
+        root: getStealthHome(),
+        kind: 'profile',
+        name: 'work',
+        pid: process.pid,
+        hostname: os.hostname(),
+      }),
+    ]);
 
-    releaseFirst();
-    releaseFirst();
-    const releaseSecond = acquireStateLocks({ profile: 'work' });
-    releaseSecond();
+    first();
+    first();
+    expect(fs.existsSync(journalPath)).toBe(true);
+    expect(fs.statSync(journalPath).ino).toBe(initialStats.ino);
+    expect(readJournalRecords(journalPath).map(({ op }) => op)).toEqual(['claim', 'release']);
+
+    const second = acquireStateLocks({ profile: 'work' });
+    expect(fs.statSync(journalPath).ino).toBe(initialStats.ino);
+    second();
+
+    const records = readJournalRecords(journalPath);
+    expect(records.map(({ op }) => op)).toEqual(['claim', 'release', 'claim', 'release']);
+    expect(activeClaims(records)).toEqual([]);
+    expect(unlink).not.toHaveBeenCalled();
+    expect(rmdir).not.toHaveBeenCalled();
+
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(journalPath).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(journalPath).uid).toBe(currentUserId());
+    }
   });
 
-  it('uses one canonical lock identity for case aliases and reports ownership', () => {
+  it('uses one canonical journal identity for case aliases and reports branded ownership', () => {
     const lease = acquireStateLocks({ profile: 'Work' });
 
     expect(lease.owns('profile', 'work')).toBe(true);
@@ -169,35 +222,126 @@ describe('state locks', () => {
     expect(lease.owns('session', 'work')).toBe(false);
     expect(ownsStateLock(lease, 'profile', 'WORK')).toBe(true);
     expect(() => acquireStateLocks({ profile: 'work' })).toThrow('already in use');
-    expect(fs.statSync(stateLockPath('profile', 'work')).isDirectory()).toBe(true);
 
     lease();
     expect(lease.owns('profile', 'work')).toBe(false);
     expect(ownsStateLock(lease, 'profile', 'work')).toBe(false);
   });
 
-  it('releases earlier deterministic locks when a later target conflicts', () => {
-    const releaseSession = acquireStateLocks({ session: 'login' });
+  it('publishes one owner-only journal per target with immutable claim bindings', () => {
+    const release = acquireStateLocks({ profile: 'work', session: 'login' });
+    const entries = fs.readdirSync(getStateLocksDir(), { withFileTypes: true });
+
+    expect(entries).toHaveLength(2);
+    const targets = [];
+    for (const entry of entries) {
+      expect(entry.isFile()).toBe(true);
+      const journalPath = path.join(getStateLocksDir(), entry.name);
+      const [claim] = readJournalRecords(journalPath);
+      expect(Object.keys(claim)).toEqual([
+        'op',
+        'token',
+        'root',
+        'kind',
+        'name',
+        'pid',
+        'hostname',
+        'createdAt',
+      ]);
+      expect(claim).toMatchObject({
+        op: 'claim',
+        root: getStealthHome(),
+        pid: process.pid,
+        hostname: os.hostname(),
+        createdAt: expect.any(String),
+      });
+      expect(claim.token).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+      targets.push(`${claim.kind}:${claim.name}`);
+    }
+    expect(targets.sort()).toEqual(['profile:work', 'session:login']);
+
+    release();
+    expect(fs.readdirSync(getStateLocksDir())).toHaveLength(2);
+  });
+
+  it('orders simultaneous contenders so only the earliest active claim succeeds', async () => {
+    const contenders = [
+      spawnStateLockContender('profile', 'simultaneous'),
+      spawnStateLockContender('profile', 'simultaneous'),
+    ];
+
+    try {
+      const outcomes = await Promise.all(contenders.map(({ outcome }) => outcome));
+      const winners = outcomes.filter(({ status }) => status === 'locked');
+      const losers = outcomes.filter(({ status }) => status === 'exited');
+      expect(winners).toHaveLength(1);
+      expect(losers).toHaveLength(1);
+      expect(losers[0].code).not.toBe(0);
+
+      const journalPath = stateLockPath('profile', 'simultaneous');
+      const records = readJournalRecords(journalPath);
+      const claims = records.filter(({ op }) => op === 'claim');
+      const active = activeClaims(records);
+      expect(claims).toHaveLength(2);
+      expect(records.filter(({ op }) => op === 'release')).toHaveLength(1);
+      expect(active).toHaveLength(1);
+      expect(active[0].token).toBe(claims[0].token);
+      expect(active[0].pid).toBe(winners[0].child.pid);
+
+      winners[0].child.kill('SIGTERM');
+      const winnerProcess = contenders.find(({ child }) => child.pid === winners[0].child.pid);
+      await expect(winnerProcess.exited).resolves.toMatchObject({
+        code: 0,
+        signal: null,
+        stderr: '',
+      });
+
+      expect(activeClaims(readJournalRecords(journalPath))).toEqual([]);
+      const reuse = acquireStateLocks({ profile: 'simultaneous' });
+      reuse();
+    } finally {
+      for (const { child } of contenders) {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }
+      await Promise.all(contenders.map(({ exited }) => exited));
+    }
+  }, 15_000);
+
+  it('releases earlier deterministic targets when a later target conflicts', () => {
+    const session = acquireStateLocks({ session: 'login' });
 
     expect(() => acquireStateLocks({ profile: 'work', session: 'login' }))
       .toThrow('already in use');
 
-    const releaseProfile = acquireStateLocks({ profile: 'work' });
-    releaseProfile();
-    releaseSession();
+    const profileRecords = readJournalRecords(stateLockPath('profile', 'work'));
+    expect(profileRecords.map(({ op }) => op)).toEqual(['claim', 'release']);
+    expect(activeClaims(profileRecords)).toEqual([]);
+
+    const profile = acquireStateLocks({ profile: 'work' });
+    profile();
+    session();
   });
 
   it('preserves acquisition errors and attaches rollback failures non-enumerably', () => {
-    const releaseSession = acquireStateLocks({ session: 'login' });
-    const profileDirectory = stateLockPath('profile', 'work');
-    const unlinkSync = fs.unlinkSync.bind(fs);
-    vi.spyOn(fs, 'unlinkSync').mockImplementation((target) => {
-      if (typeof target === 'string' && path.dirname(target) === profileDirectory) {
-        const error = new Error('profile lock busy');
+    const session = acquireStateLocks({ session: 'login' });
+    const tokenKinds = new Map();
+    const writeSync = fs.writeSync.bind(fs);
+    let rejectedProfileRelease = false;
+
+    vi.spyOn(fs, 'writeSync').mockImplementation((descriptor, buffer, ...args) => {
+      const record = JSON.parse(buffer.toString('utf8').trim());
+      if (record.op === 'claim') tokenKinds.set(record.token, record.kind);
+      if (
+        record.op === 'release'
+        && tokenKinds.get(record.token) === 'profile'
+        && !rejectedProfileRelease
+      ) {
+        rejectedProfileRelease = true;
+        const error = new Error('profile release busy');
         error.code = 'EBUSY';
         throw error;
       }
-      return unlinkSync(target);
+      return writeSync(descriptor, buffer, ...args);
     });
 
     let error;
@@ -213,21 +357,19 @@ describe('state locks', () => {
     ]);
     expect(Object.getOwnPropertyDescriptor(error, 'cleanupFailures')?.enumerable).toBe(false);
     expect(Object.keys(error)).not.toContain('cleanupFailures');
-    expect(fs.existsSync(profileDirectory)).toBe(true);
+    expect(activeClaims(readJournalRecords(stateLockPath('profile', 'work')))).toHaveLength(1);
 
     vi.restoreAllMocks();
-    fs.rmSync(profileDirectory, { recursive: true, force: true });
-    releaseSession();
+    session();
   });
 
-  it('fails closed without removing a generation owned by a dead local process', () => {
+  it('fails closed on a dead local claim and appends release for its failed contender claim', () => {
     const stalePid = 2_147_483_647;
-    const { directoryPath, ownerPath, metadata } = createLockGeneration('profile', 'work', {
-      metadata: {
-        pid: stalePid,
-        createdAt: new Date(0).toISOString(),
-      },
+    const stale = claimRecord('profile', 'work', {
+      pid: stalePid,
+      createdAt: new Date(0).toISOString(),
     });
+    const journalPath = writeJournal('profile', 'work', [stale]);
 
     let error;
     try {
@@ -236,239 +378,157 @@ describe('state locks', () => {
       error = cause;
     }
 
-    expect(error?.message).toContain('stale lock');
-    expect(error?.hint).toBe(staleLockRemovalHint(directoryPath));
-    expect(JSON.parse(fs.readFileSync(ownerPath, 'utf8'))).toEqual(metadata);
-    expect(fs.statSync(directoryPath).isDirectory()).toBe(true);
+    expect(error?.message).toContain('stale lock claim');
+    expect(error?.hint).toBe(journalRemovalHint(journalPath));
+    const records = readJournalRecords(journalPath);
+    expect(records.map(({ op }) => op)).toEqual(['claim', 'claim', 'release']);
+    expect(activeClaims(records)).toEqual([stale]);
   });
 
-  it('fails closed without removing empty or invalid lock directories', () => {
-    const emptyDirectory = stateLockPath('profile', 'empty');
-    fs.mkdirSync(emptyDirectory, { recursive: true, mode: 0o700 });
+  it('fails closed on a remote claim with the exact journal path', () => {
+    const remote = claimRecord('session', 'login', {
+      hostname: 'remote-host.example',
+      pid: 4242,
+    });
+    const journalPath = writeJournal('session', 'login', [remote]);
 
-    let emptyError;
-    try {
-      acquireStateLocks({ profile: 'empty' });
-    } catch (cause) {
-      emptyError = cause;
-    }
-    expect(emptyError?.message).toContain('invalid stale lock');
-    expect(emptyError?.hint).toBe(staleLockRemovalHint(emptyDirectory));
-    expect(fs.readdirSync(emptyDirectory)).toEqual([]);
-
-    const invalid = createLockGeneration('session', 'login', { contents: 'not-json' });
-    let metadataError;
+    let error;
     try {
       acquireStateLocks({ session: 'login' });
     } catch (cause) {
-      metadataError = cause;
+      error = cause;
     }
-    expect(metadataError?.message).toContain('invalid stale lock');
-    expect(metadataError?.hint).toBe(staleLockRemovalHint(invalid.directoryPath));
-    expect(fs.readFileSync(invalid.ownerPath, 'utf8')).toBe('not-json');
+
+    expect(error?.message).toContain('remote-host.example');
+    expect(error?.hint).toBe(journalRemovalHint(journalPath));
+    expect(activeClaims(readJournalRecords(journalPath))).toEqual([remote]);
   });
 
-  it('rejects legacy files and unsafe owner child types without deleting them', () => {
-    const locksDir = getStateLocksDir();
-    fs.mkdirSync(locksDir, { recursive: true, mode: 0o700 });
-    const legacyPath = stateLockPath('profile', 'legacy');
-    fs.writeFileSync(legacyPath, 'legacy-lock', { mode: 0o600 });
+  it.each([
+    ['malformed JSON', 'not-json\n'],
+    ['truncated final record', '{"op":"claim"'],
+    ['empty interior record', '\n'],
+  ])('fails closed on a %s journal without modifying it', (_label, contents) => {
+    const journalPath = writeJournal('profile', 'broken', [], { contents });
 
-    let legacyError;
+    let error;
     try {
-      acquireStateLocks({ profile: 'legacy' });
+      acquireStateLocks({ profile: 'broken' });
     } catch (cause) {
-      legacyError = cause;
+      error = cause;
     }
-    expect(legacyError?.message).toContain('lock directory is unsafe');
-    expect(legacyError?.hint).toBe(staleLockRemovalHint(legacyPath));
-    expect(fs.readFileSync(legacyPath, 'utf8')).toBe('legacy-lock');
 
-    const invalidOwner = createLockGeneration('session', 'owner-dir', {
-      ownerType: 'directory',
-    });
-    let ownerError;
-    try {
-      acquireStateLocks({ session: 'owner-dir' });
-    } catch (cause) {
-      ownerError = cause;
+    expect(error?.message).toContain('invalid lock journal');
+    expect(error?.hint).toBe(journalRemovalHint(journalPath));
+    expect(fs.readFileSync(journalPath, 'utf8')).toBe(contents);
+  });
+
+  it('rejects claim history bound to a different root, kind, or canonical name', () => {
+    const cases = [
+      claimRecord('profile', 'bound', { root: temporaryStealthHome('wrong-binding') }),
+      claimRecord('session', 'bound'),
+      claimRecord('profile', 'other'),
+    ];
+
+    for (const [index, claim] of cases.entries()) {
+      const name = `bound-${index}`;
+      const journalPath = writeJournal('profile', name, [{
+        ...claim,
+        name: index === 2 ? 'other' : name,
+      }]);
+      expect(() => acquireStateLocks({ profile: name })).toThrow('invalid lock journal');
+      expect(readJournalRecords(journalPath)).toEqual([expect.objectContaining({ token: claim.token })]);
     }
-    expect(ownerError?.message).toContain('owner metadata is unsafe');
-    expect(ownerError?.hint).toBe(staleLockRemovalHint(invalidOwner.directoryPath));
-    expect(fs.statSync(invalidOwner.ownerPath).isDirectory()).toBe(true);
   });
 
-  const posixIt = process.platform === 'win32' ? it.skip : it;
-  posixIt('validates lock directory and owner permissions without hardening contenders', () => {
-    const unsafeDirectory = createLockGeneration('profile', 'directory-mode');
-    fs.chmodSync(unsafeDirectory.directoryPath, 0o755);
+  it('keeps ownership active and retries after a transient release append failure', () => {
+    const lease = acquireStateLocks({ profile: 'work' });
+    const journalPath = stateLockPath('profile', 'work');
+    const writeSync = fs.writeSync.bind(fs);
+    let failed = false;
 
-    expect(() => acquireStateLocks({ profile: 'directory-mode' }))
-      .toThrow('lock directory is unsafe');
-    expect(fs.statSync(unsafeDirectory.directoryPath).mode & 0o777).toBe(0o755);
-
-    const unsafeOwner = createLockGeneration('session', 'owner-mode');
-    fs.chmodSync(unsafeOwner.ownerPath, 0o644);
-
-    expect(() => acquireStateLocks({ session: 'owner-mode' }))
-      .toThrow('owner metadata is unsafe');
-    expect(fs.statSync(unsafeOwner.ownerPath).mode & 0o777).toBe(0o644);
-  });
-
-  it('rejects owner metadata bound to another root or user', () => {
-    const wrongRoot = createLockGeneration('profile', 'wrong-root', {
-      metadata: { root: temporaryStealthHome('metadata-root') },
-    });
-    expect(() => acquireStateLocks({ profile: 'wrong-root' }))
-      .toThrow('invalid stale lock');
-    expect(fs.existsSync(wrongRoot.ownerPath)).toBe(true);
-
-    const wrongUid = createLockGeneration('session', 'wrong-user', {
-      metadata: { uid: currentUserId() === null ? 1 : currentUserId() + 1 },
-    });
-    expect(() => acquireStateLocks({ session: 'wrong-user' }))
-      .toThrow('invalid stale lock');
-    expect(fs.existsSync(wrongUid.ownerPath)).toBe(true);
-  });
-
-  it('publishes owner-only lock directories with one UUID-specific metadata child', () => {
-    const hardLink = vi.spyOn(fs, 'linkSync');
-    const release = acquireStateLocks({ profile: 'work', session: 'login' });
-    const locksDir = getStateLocksDir();
-    const entries = fs.readdirSync(locksDir, { withFileTypes: true });
-
-    expect(hardLink).not.toHaveBeenCalled();
-    expect(entries).toHaveLength(2);
-    const targets = [];
-    for (const entry of entries) {
-      expect(entry.isDirectory()).toBe(true);
-      const directoryPath = path.join(locksDir, entry.name);
-      const ownerPath = onlyOwnerPath(directoryPath);
-      expect(path.basename(ownerPath)).toMatch(
-        /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.owner\.json$/,
-      );
-      const metadata = JSON.parse(fs.readFileSync(ownerPath, 'utf8'));
-      expect(metadata).toMatchObject({
-        token: path.basename(ownerPath, '.owner.json'),
-        root: getStealthHome(),
-        uid: currentUserId(),
-        pid: process.pid,
-        hostname: os.hostname(),
-        createdAt: expect.any(String),
-      });
-      targets.push(`${metadata.kind}:${metadata.name}`);
-
-      if (process.platform !== 'win32') {
-        expect(fs.statSync(directoryPath).mode & 0o777).toBe(0o700);
-        expect(fs.statSync(ownerPath).mode & 0o777).toBe(0o600);
-        expect(fs.statSync(directoryPath).uid).toBe(currentUserId());
-        expect(fs.statSync(ownerPath).uid).toBe(currentUserId());
+    vi.spyOn(fs, 'writeSync').mockImplementation((descriptor, buffer, ...args) => {
+      const record = JSON.parse(buffer.toString('utf8').trim());
+      if (record.op === 'release' && !failed) {
+        failed = true;
+        const error = new Error('transient append failure');
+        error.code = 'EIO';
+        throw error;
       }
-    }
-    expect(targets.sort()).toEqual(['profile:work', 'session:login']);
-
-    release();
-    expect(fs.readdirSync(locksDir)).toEqual([]);
-  });
-
-  it('removes its partial generation when writing owner metadata fails', () => {
-    vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
-      const error = new Error('disk full');
-      error.code = 'ENOSPC';
-      throw error;
+      return writeSync(descriptor, buffer, ...args);
     });
 
-    expect(() => acquireStateLocks({ profile: 'work' })).toThrow('Failed to acquire');
-    expect(fs.readdirSync(getStateLocksDir())).toEqual([]);
+    expect(() => lease()).toThrow('transient append failure');
+    expect(lease.owns('profile', 'work')).toBe(true);
+    expect(activeClaims(readJournalRecords(journalPath))).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    lease();
+    expect(lease.owns('profile', 'work')).toBe(false);
+    expect(readJournalRecords(journalPath).map(({ op }) => op)).toEqual(['claim', 'release']);
   });
 
-  it('keeps release and ownership retryable after a transient owner unlink failure', () => {
-    const release = acquireStateLocks({ profile: 'work' });
-    const directoryPath = stateLockPath('profile', 'work');
-    const ownerPath = onlyOwnerPath(directoryPath);
-    const unlinkSync = fs.unlinkSync.bind(fs);
-    vi.spyOn(fs, 'unlinkSync')
-      .mockImplementationOnce(() => {
-        const error = new Error('busy');
-        error.code = 'EBUSY';
+  it('retries an unconfirmed fsync and an old-token release cannot affect a successor', () => {
+    const oldLease = acquireStateLocks({ session: 'login' });
+    const journalPath = stateLockPath('session', 'login');
+    const oldToken = readJournalRecords(journalPath)[0].token;
+    const fsyncSync = fs.fsyncSync.bind(fs);
+    let failed = false;
+
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
+      if (!failed) {
+        failed = true;
+        const error = new Error('transient fsync failure');
+        error.code = 'EIO';
         throw error;
-      })
-      .mockImplementation((target) => unlinkSync(target));
+      }
+      return fsyncSync(descriptor);
+    });
 
-    expect(() => release()).toThrow('busy');
-    expect(release.owns('profile', 'work')).toBe(true);
-    expect(fs.existsSync(ownerPath)).toBe(true);
-    release();
-    expect(release.owns('profile', 'work')).toBe(false);
-    expect(fs.existsSync(directoryPath)).toBe(false);
+    expect(() => oldLease()).toThrow('transient fsync failure');
+    expect(oldLease.owns('session', 'login')).toBe(true);
+    expect(activeClaims(readJournalRecords(journalPath))).toEqual([]);
+
+    vi.restoreAllMocks();
+    const successor = acquireStateLocks({ session: 'login' });
+    const successorClaim = activeClaims(readJournalRecords(journalPath))[0];
+    expect(successorClaim.token).not.toBe(oldToken);
+
+    oldLease();
+    expect(oldLease.owns('session', 'login')).toBe(false);
+    expect(successor.owns('session', 'login')).toBe(true);
+    expect(activeClaims(readJournalRecords(journalPath))).toEqual([successorClaim]);
+    expect(
+      readJournalRecords(journalPath)
+        .filter((record) => record.op === 'release' && record.token === oldToken),
+    ).toHaveLength(2);
+
+    successor();
   });
 
-  it('retries directory removal after owner unlink succeeded transiently', () => {
-    const release = acquireStateLocks({ profile: 'work' });
-    const directoryPath = stateLockPath('profile', 'work');
-    const rmdirSync = fs.rmdirSync.bind(fs);
-    vi.spyOn(fs, 'rmdirSync')
-      .mockImplementationOnce(() => {
-        const error = new Error('directory busy');
-        error.code = 'EBUSY';
-        throw error;
-      })
-      .mockImplementation((target) => rmdirSync(target));
-
-    expect(() => release()).toThrow('directory busy');
-    expect(release.owns('profile', 'work')).toBe(false);
-    expect(fs.readdirSync(directoryPath)).toEqual([]);
-
-    release();
-    expect(fs.existsSync(directoryPath)).toBe(false);
-    expect(() => release()).not.toThrow();
-  });
-
-  it('does not remove a successor that replaces the lock generation before old release', () => {
+  it('clears an old lease without modifying an externally replaced successor journal', () => {
     const oldLease = acquireStateLocks({ profile: 'work' });
-    const directoryPath = stateLockPath('profile', 'work');
-    fs.rmSync(directoryPath, { recursive: true, force: true });
+    const journalPath = stateLockPath('profile', 'work');
+    const displacedPath = `${journalPath}.displaced`;
+    fs.renameSync(journalPath, displacedPath);
 
     const successor = acquireStateLocks({ profile: 'work' });
-    const successorOwner = readOwner(directoryPath);
+    const successorContents = fs.readFileSync(journalPath, 'utf8');
+    const displacedContents = fs.readFileSync(displacedPath, 'utf8');
 
     expect(() => oldLease()).not.toThrow();
     expect(oldLease.owns('profile', 'work')).toBe(false);
-    expect(fs.existsSync(directoryPath)).toBe(true);
-    expect(fs.readFileSync(successorOwner.ownerPath, 'utf8')).toBe(successorOwner.contents);
+    expect(fs.readFileSync(journalPath, 'utf8')).toBe(successorContents);
+    expect(fs.readFileSync(displacedPath, 'utf8')).toBe(displacedContents);
     expect(successor.owns('profile', 'work')).toBe(true);
 
     successor();
   });
 
-  it('does not remove a successor while retrying an old generation rmdir', () => {
-    const oldLease = acquireStateLocks({ session: 'login' });
-    const directoryPath = stateLockPath('session', 'login');
-    vi.spyOn(fs, 'rmdirSync').mockImplementationOnce(() => {
-      const error = new Error('directory busy');
-      error.code = 'EBUSY';
-      throw error;
-    });
-
-    expect(() => oldLease()).toThrow('directory busy');
-    expect(fs.readdirSync(directoryPath)).toEqual([]);
-
-    vi.restoreAllMocks();
-    fs.rmdirSync(directoryPath);
-    const successor = acquireStateLocks({ session: 'login' });
-    const successorOwner = readOwner(directoryPath);
-
-    expect(() => oldLease()).not.toThrow();
-    expect(fs.readFileSync(successorOwner.ownerPath, 'utf8')).toBe(successorOwner.contents);
-    expect(successor.owns('session', 'login')).toBe(true);
-
-    successor();
-  });
-
-  it('binds leases and cleanup paths to the resolved STEALTH_HOME root', () => {
+  it('binds leases and release descriptors to the resolved STEALTH_HOME root', () => {
     const originalRoot = getStealthHome();
     const oldLease = acquireStateLocks({ profile: 'work' });
-    const originalDirectory = stateLockPath('profile', 'work', originalRoot);
+    const originalJournal = stateLockPath('profile', 'work', originalRoot);
     const newRoot = temporaryStealthHome('root-switch');
     process.env.STEALTH_HOME = newRoot;
 
@@ -482,33 +542,17 @@ describe('state locks', () => {
         return 'new-root';
       });
       expect(callbackResult).toBe('new-root');
-      expect(fs.existsSync(stateLockPath('profile', 'work', newRoot))).toBe(false);
+      const newJournal = stateLockPath('profile', 'work', newRoot);
+      expect(readJournalRecords(newJournal).map(({ op }) => op)).toEqual(['claim', 'release']);
 
       const successor = acquireStateLocks({ profile: 'work' });
-      const successorDirectory = stateLockPath('profile', 'work', newRoot);
       oldLease();
-      expect(fs.existsSync(originalDirectory)).toBe(false);
-      expect(fs.existsSync(successorDirectory)).toBe(true);
+      expect(readJournalRecords(originalJournal).map(({ op }) => op)).toEqual(['claim', 'release']);
       expect(successor.owns('profile', 'work')).toBe(true);
       successor();
     } finally {
       process.env.STEALTH_HOME = TEST_STEALTH_HOME;
-      fs.rmSync(originalDirectory, { recursive: true, force: true });
     }
-  });
-
-  it('revokes write authorization when owner metadata cannot be verified', () => {
-    const release = acquireStateLocks({ profile: 'work' });
-    const directoryPath = stateLockPath('profile', 'work');
-    const ownerPath = onlyOwnerPath(directoryPath);
-    fs.writeFileSync(ownerPath, 'invalid-metadata');
-
-    expect(() => release()).toThrow('ownership could not be verified');
-    expect(release.owns('profile', 'work')).toBe(false);
-    expect(fs.existsSync(directoryPath)).toBe(true);
-
-    fs.rmSync(directoryPath, { recursive: true, force: true });
-    expect(() => release()).not.toThrow();
   });
 
   it('does not trust forged lease predicates', () => {
@@ -543,131 +587,79 @@ describe('state locks', () => {
     lease();
 
     expect(withStateLock('session', 'Login', null, () => 'sync')).toBe('sync');
-    expect(fs.existsSync(stateLockPath('session', 'login'))).toBe(false);
-
     await expect(withStateLock('session', 'Login', null, async () => 'async'))
       .resolves.toBe('async');
-    expect(fs.existsSync(stateLockPath('session', 'login'))).toBe(false);
+    expect(activeClaims(readJournalRecords(stateLockPath('session', 'login')))).toEqual([]);
   });
 
-  it('preserves callback errors with non-enumerable release diagnostics', () => {
-    const primary = new Error('callback failed');
-    const directoryPath = stateLockPath('profile', 'callback');
-    vi.spyOn(fs, 'rmdirSync').mockImplementationOnce(() => {
-      const error = new Error('cleanup busy');
-      error.code = 'EBUSY';
-      throw error;
+  it('rejects oversized journals with an actionable maintenance hint', () => {
+    const journalPath = writeJournal('profile', 'large', [], {
+      contents: Buffer.alloc(MAX_JOURNAL_BYTES + 1, 0x20),
     });
-
-    let thrown;
-    try {
-      withStateLock('profile', 'callback', null, () => {
-        throw primary;
-      });
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toBe(primary);
-    expect(thrown.cleanupFailures).toEqual([
-      expect.objectContaining({ target: 'profile:callback' }),
-    ]);
-    expect(Object.getOwnPropertyDescriptor(thrown, 'cleanupFailures')?.enumerable).toBe(false);
-    expect(Object.keys(thrown)).not.toContain('cleanupFailures');
-
-    vi.restoreAllMocks();
-    fs.rmdirSync(directoryPath);
-  });
-
-  it('does not replace a non-extensible primary error when release also fails', () => {
-    const primary = Object.freeze(new Error('frozen callback failure'));
-    const directoryPath = stateLockPath('session', 'frozen-callback');
-    vi.spyOn(fs, 'rmdirSync').mockImplementationOnce(() => {
-      const error = new Error('cleanup busy');
-      error.code = 'EBUSY';
-      throw error;
-    });
-
-    let thrown;
-    try {
-      withStateLock('session', 'frozen-callback', null, () => {
-        throw primary;
-      });
-    } catch (error) {
-      thrown = error;
-    }
-
-    expect(thrown).toBe(primary);
-    expect(Object.hasOwn(thrown, 'cleanupFailures')).toBe(false);
-
-    vi.restoreAllMocks();
-    fs.rmdirSync(directoryPath);
-  });
-
-  const symlinkIt = process.platform === 'win32' ? it.skip : it;
-  symlinkIt('rejects a symbolic-link lock directory without deleting it', () => {
-    const locksDir = getStateLocksDir();
-    fs.mkdirSync(locksDir, { recursive: true, mode: 0o700 });
-    const outside = path.join(TEST_STEALTH_HOME, 'outside-lock-directory');
-    fs.rmSync(outside, { recursive: true, force: true });
-    fs.mkdirSync(outside, { mode: 0o700 });
-    const directoryPath = stateLockPath('profile', 'work');
-    fs.symlinkSync(outside, directoryPath);
+    const originalSize = fs.statSync(journalPath).size;
 
     let error;
     try {
-      acquireStateLocks({ profile: 'work' });
+      acquireStateLocks({ profile: 'large' });
     } catch (cause) {
       error = cause;
     }
-    expect(error?.message).toContain('lock directory is unsafe');
-    expect(error?.hint).toBe(staleLockRemovalHint(directoryPath));
-    expect(fs.lstatSync(directoryPath).isSymbolicLink()).toBe(true);
-    expect(fs.statSync(outside).isDirectory()).toBe(true);
+
+    expect(error?.message).toContain('exceeds the 4 MiB safety limit');
+    expect(error?.hint).toBe(journalMaintenanceHint(journalPath));
+    expect(fs.statSync(journalPath).size).toBe(originalSize);
   });
 
-  symlinkIt('rejects a symbolic-link owner child without following or deleting it', () => {
-    const outside = path.join(TEST_STEALTH_HOME, 'outside-lock-owner');
-    fs.writeFileSync(outside, 'outside', { mode: 0o600 });
-    const generation = createLockGeneration('session', 'login', {
-      ownerType: 'symlink',
-      symlinkTarget: outside,
-    });
+  const posixIt = process.platform === 'win32' ? it.skip : it;
+  posixIt('rejects insecure journal permissions without hardening or deleting the file', () => {
+    const journalPath = writeJournal('profile', 'mode', [], { mode: 0o644 });
 
     let error;
     try {
-      acquireStateLocks({ session: 'login' });
+      acquireStateLocks({ profile: 'mode' });
     } catch (cause) {
       error = cause;
     }
-    expect(error?.message).toContain('owner metadata is unsafe');
-    expect(error?.hint).toBe(staleLockRemovalHint(generation.directoryPath));
-    expect(fs.lstatSync(generation.ownerPath).isSymbolicLink()).toBe(true);
-    expect(fs.readFileSync(outside, 'utf8')).toBe('outside');
+
+    expect(error?.message).toContain('lock journal is unsafe');
+    expect(error?.hint).toBe(journalRemovalHint(journalPath));
+    expect(fs.statSync(journalPath).mode & 0o777).toBe(0o644);
+    expect(fs.existsSync(journalPath)).toBe(true);
   });
 
-  it('rejects unsafe and Windows-reserved names before touching a lock path', () => {
+  posixIt('rejects a symbolic-link journal without following or modifying its target', () => {
+    const outside = path.join(TEST_STEALTH_HOME, 'outside-lock-journal');
+    fs.writeFileSync(outside, 'outside\n', { mode: 0o600 });
+    const journalPath = stateLockPath('session', 'symlink');
+    fs.mkdirSync(path.dirname(journalPath), { recursive: true, mode: 0o700 });
+    fs.symlinkSync(outside, journalPath);
+
+    let error;
+    try {
+      acquireStateLocks({ session: 'symlink' });
+    } catch (cause) {
+      error = cause;
+    }
+
+    expect(error?.message).toContain('lock journal is unsafe');
+    expect(error?.hint).toBe(journalRemovalHint(journalPath));
+    expect(fs.lstatSync(journalPath).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(outside, 'utf8')).toBe('outside\n');
+  });
+
+  it('rejects a directory at the deterministic journal path without deleting it', () => {
+    const journalPath = stateLockPath('profile', 'directory');
+    fs.mkdirSync(journalPath, { recursive: true, mode: 0o700 });
+
+    expect(() => acquireStateLocks({ profile: 'directory' })).toThrow('lock journal is unsafe');
+    expect(fs.statSync(journalPath).isDirectory()).toBe(true);
+  });
+
+  it('rejects unsafe and Windows-reserved names before touching lock storage', () => {
     expect(() => acquireStateLocks({ profile: '../work' })).toThrow('only letters');
     expect(() => acquireStateLocks({ session: 'login.json' })).toThrow('only letters');
     expect(() => acquireStateLocks({ profile: 'CON' })).toThrow('reserved Windows');
     expect(() => acquireStateLocks({ session: 'lPt9' })).toThrow('reserved Windows');
     expect(fs.existsSync(getStateLocksDir())).toBe(false);
   });
-
-  it('remains compatible with cross-process lock holders', async () => {
-    const { child, exited } = await startStateLockHolder('profile', 'shared-profile');
-
-    try {
-      expect(() => acquireStateLocks({ profile: 'shared-profile' }))
-        .toThrow('already in use');
-    } finally {
-      child.kill('SIGTERM');
-    }
-
-    const childResult = await exited;
-    expect(childResult).toMatchObject({ code: 0, signal: null, stderr: '' });
-
-    const release = acquireStateLocks({ profile: 'shared-profile' });
-    release();
-  }, 15_000);
 });

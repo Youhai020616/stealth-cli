@@ -13,6 +13,50 @@ export const SIGNAL_EXIT_CODES = {
   SIGTERM: 143,
 };
 
+function attachLifecycleResult(error, result) {
+  if (!error || (typeof error !== 'object' && typeof error !== 'function')) return error;
+  Object.defineProperty(error, 'lifecycleResult', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: result,
+  });
+  return error;
+}
+
+/**
+ * Convert an incomplete command-error finalization result into one hidden
+ * cleanup failure while retaining the complete lifecycle evidence.
+ */
+export function createLifecyclePersistenceCleanupFailure(result) {
+  if (
+    !result
+    || !(
+      result.persistenceIncomplete
+      || result.exitCode === 8
+      || result.finalCaptureError
+    )
+  ) {
+    return null;
+  }
+
+  const cleanupFailures = Array.isArray(result.cleanupErrors)
+    ? result.cleanupErrors
+    : [];
+  const error = new PersistenceError('Browser state finalization was incomplete', {
+    cause: result.finalCaptureError || result.cleanup?.persistenceError || null,
+    cleanupFailures,
+    results: result.persistence || null,
+    snapshotMetadata: {
+      persistedAt: result.persistedAt || null,
+      usedCheckpointFallback: Boolean(result.usedCheckpointFallback),
+      persistenceIncomplete: Boolean(result.persistenceIncomplete),
+    },
+  });
+  attachLifecycleResult(error, result);
+  return { target: 'persistence', error };
+}
+
 function deferred() {
   let resolve;
   let reject;
@@ -385,7 +429,7 @@ export function createBrowserLifecycle(handle, opts = {}) {
 
     if (fatalPersistenceError && cleanupErrors.length > 0) {
       const targets = cleanupErrors.map(({ target }) => target).join(', ');
-      throw new PersistenceError(
+      const combinedError = new PersistenceError(
         `${fatalPersistenceError.message}; browser cleanup also failed (${targets})`,
         {
           cause: fatalPersistenceError,
@@ -395,8 +439,11 @@ export function createBrowserLifecycle(handle, opts = {}) {
           snapshotMetadata: fatalPersistenceError.snapshotMetadata,
         },
       );
+      throw attachLifecycleResult(combinedError, result);
     }
-    if (fatalPersistenceError) throw fatalPersistenceError;
+    if (fatalPersistenceError) {
+      throw attachLifecycleResult(fatalPersistenceError, result);
+    }
     return result;
   };
 

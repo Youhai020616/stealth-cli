@@ -31,7 +31,8 @@ vi.mock('../../src/client.js', () => ({
   daemonRequest: vi.fn(),
 }));
 
-vi.mock('../../src/profiles.js', () => ({
+vi.mock('../../src/profiles.js', async (importOriginal) => ({
+  ...await importOriginal(),
   loadProfile: vi.fn(),
   touchProfile: vi.fn(),
   saveProfileCookies: vi.fn(),
@@ -39,8 +40,15 @@ vi.mock('../../src/profiles.js', () => ({
   loadCookiesFromProfile: vi.fn(),
 }));
 
-vi.mock('../../src/session.js', () => ({
-  getSession: vi.fn(() => ({ profile: null })),
+vi.mock('../../src/session.js', async (importOriginal) => ({
+  ...await importOriginal(),
+  getSession: vi.fn((name = 'login') => ({
+    name,
+    profile: null,
+    cookies: [],
+    history: [],
+    lastUrl: null,
+  })),
   restoreSession: vi.fn(),
   captureSession: vi.fn(),
   saveSessionSnapshot: vi.fn(),
@@ -57,6 +65,7 @@ vi.mock('../../src/utils/state-lock.js', () => ({
   ownsStateLock: vi.fn((lease, kind, name) => (
     brandedStateLeases.has(lease) && lease.owns(kind, name)
   )),
+  withStateLock: vi.fn((_kind, _name, lease, operation) => operation(lease)),
 }));
 
 // Now import the module under test
@@ -100,7 +109,19 @@ const DEFAULT_PROFILE = {
     os: 'macos',
   },
   proxy: null,
+  cookies: [],
 };
+
+function sessionFixture(name = 'login', overrides = {}) {
+  return {
+    name,
+    profile: null,
+    cookies: [],
+    history: [],
+    lastUrl: null,
+    ...overrides,
+  };
+}
 
 // Helper: create mock browser/context/page and wire up createBrowser
 function setupMockBrowser() {
@@ -131,7 +152,7 @@ async function launchStatefulBrowser(opts, mocks = setupMockBrowser(), stateLeas
   acquireStateLocks.mockReturnValueOnce(lease);
   if (profile) loadProfile.mockReturnValue(DEFAULT_PROFILE);
   if (session) {
-    getSession.mockReturnValue({ profile: profile || null });
+    getSession.mockReturnValue(sessionFixture(session, { profile: profile || null }));
     restoreSession.mockResolvedValue({ lastUrl: null, history: [], profile: profile || null });
   }
 
@@ -143,7 +164,7 @@ describe('launchBrowser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     isDaemonRunning.mockReturnValue(false);
-    getSession.mockReset().mockReturnValue({ profile: null });
+    getSession.mockReset().mockImplementation((name) => sessionFixture(name));
     restoreSession.mockReset().mockResolvedValue({
       lastUrl: null,
       history: [],
@@ -213,6 +234,7 @@ describe('launchBrowser', () => {
     loadProfile.mockReturnValue({
       fingerprint: { locale: 'ja-JP', timezone: 'Asia/Tokyo', viewport: { width: 1920, height: 1080 }, os: 'windows' },
       proxy: null,
+      cookies: [],
     });
     const stateLease = createStateLease({ profile: 'jp-desktop' });
     acquireStateLocks.mockReturnValue(stateLease);
@@ -255,10 +277,11 @@ describe('launchBrowser', () => {
   });
 
   it('should infer and restore the linked profile for a session-only launch', async () => {
-    getSession.mockReturnValue({ profile: 'work' });
+    getSession.mockReturnValue(sessionFixture('login', { profile: 'work' }));
     loadProfile.mockReturnValue({
       fingerprint: { locale: 'en-US', timezone: 'UTC', viewport: { width: 1280, height: 720 }, os: 'macos' },
       proxy: null,
+      cookies: [],
     });
     const { mockContext } = setupMockBrowser();
 
@@ -278,8 +301,8 @@ describe('launchBrowser', () => {
     ['another profile', 'other'],
   ])('rejects an inferred session profile changing from work to %s after locking', async (_label, linkedProfile) => {
     getSession
-      .mockReturnValueOnce({ profile: 'work' })
-      .mockReturnValueOnce({ profile: linkedProfile });
+      .mockReturnValueOnce(sessionFixture('login', { profile: 'work' }))
+      .mockReturnValueOnce(sessionFixture('login', { profile: linkedProfile }));
 
     await expect(launchBrowser({
       session: 'login',
@@ -294,8 +317,8 @@ describe('launchBrowser', () => {
 
   it('allows an explicit profile to bind a session that is null after locking', async () => {
     getSession
-      .mockReturnValueOnce({ profile: 'work' })
-      .mockReturnValueOnce({ profile: null });
+      .mockReturnValueOnce(sessionFixture('login', { profile: 'work' }))
+      .mockReturnValueOnce(sessionFixture('login'));
     loadProfile.mockReturnValue(DEFAULT_PROFILE);
     setupMockBrowser();
 
@@ -352,8 +375,9 @@ describe('launchBrowser', () => {
     loadProfile.mockReturnValue({
       fingerprint: { locale: 'en-US', timezone: 'UTC', viewport: { width: 1280, height: 720 }, os: 'macos' },
       proxy: null,
+      cookies: [],
     });
-    getSession.mockReturnValue({ profile: 'profile-a' });
+    getSession.mockReturnValue(sessionFixture('login', { profile: 'profile-a' }));
 
     await expect(launchBrowser({
       profile: 'profile-b',
@@ -367,8 +391,9 @@ describe('launchBrowser', () => {
     loadProfile.mockReturnValue({
       fingerprint: { locale: 'en-US', timezone: 'UTC', viewport: { width: 1280, height: 720 }, os: 'macos' },
       proxy: null,
+      cookies: [],
     });
-    getSession.mockReturnValue({ profile: 'work' });
+    getSession.mockReturnValue(sessionFixture('login', { profile: 'work' }));
     restoreSession.mockResolvedValue({ lastUrl: null, history: [], profile: 'work' });
     const { mockContext } = setupMockBrowser();
 
@@ -388,8 +413,9 @@ describe('launchBrowser', () => {
     loadProfile.mockReturnValue({
       fingerprint: { locale: 'en-US', timezone: 'UTC', viewport: { width: 1280, height: 720 }, os: 'macos' },
       proxy: null,
+      cookies: [],
     });
-    getSession.mockReturnValue({ profile: 'work' });
+    getSession.mockReturnValue(sessionFixture('login', { profile: 'work' }));
     restoreSession.mockResolvedValue({ lastUrl: null, history: [] });
     const { mockContext } = setupMockBrowser();
 
@@ -422,6 +448,72 @@ describe('launchBrowser', () => {
     expect(createBrowser).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['locale', {
+      ...DEFAULT_PROFILE,
+      fingerprint: { ...DEFAULT_PROFILE.fingerprint, locale: 'en_US' },
+    }],
+    ['timezone', {
+      ...DEFAULT_PROFILE,
+      fingerprint: { ...DEFAULT_PROFILE.fingerprint, timezone: 'Mars/Olympus' },
+    }],
+    ['fractional viewport', {
+      ...DEFAULT_PROFILE,
+      fingerprint: {
+        ...DEFAULT_PROFILE.fingerprint,
+        viewport: { ...DEFAULT_PROFILE.fingerprint.viewport, width: 1280.5 },
+      },
+    }],
+    ['oversized viewport', {
+      ...DEFAULT_PROFILE,
+      fingerprint: {
+        ...DEFAULT_PROFILE.fingerprint,
+        viewport: { ...DEFAULT_PROFILE.fingerprint.viewport, height: 16_385 },
+      },
+    }],
+    ['negative geolocation accuracy', {
+      ...DEFAULT_PROFILE,
+      fingerprint: {
+        ...DEFAULT_PROFILE.fingerprint,
+        geo: { latitude: 0, longitude: 0, accuracy: -1 },
+      },
+    }],
+    ['non-string cookie partition key', {
+      ...DEFAULT_PROFILE,
+      cookies: [{
+        name: 'sid',
+        value: '123',
+        domain: 'example.com',
+        path: '/',
+        partitionKey: 42,
+      }],
+    }],
+    ['inconsistent cookie address', {
+      ...DEFAULT_PROFILE,
+      cookies: [{
+        name: 'sid',
+        value: '123',
+        url: 'https://example.com',
+        domain: 'example.com',
+        path: '/',
+      }],
+    }],
+    ['invalid proxy URL', {
+      ...DEFAULT_PROFILE,
+      proxy: 'http://proxy.example:8080/path',
+    }],
+  ])('rejects malformed persisted profile %s before creating a browser', async (_label, profile) => {
+    loadProfile.mockReturnValue(profile);
+
+    await expect(launchBrowser({ profile: 'malformed' })).rejects.toMatchObject({
+      name: 'ProfileError',
+      code: 8,
+    });
+
+    expect(touchProfile).not.toHaveBeenCalled();
+    expect(createBrowser).not.toHaveBeenCalled();
+  });
+
   it('should fail before locks and browser launch when a session is malformed', async () => {
     getSession.mockImplementation(() => {
       throw new ProfileError('Session "malformed" has an invalid format');
@@ -430,6 +522,38 @@ describe('launchBrowser', () => {
     await expect(launchBrowser({ session: 'malformed' })).rejects.toThrow('invalid format');
     expect(acquireStateLocks).not.toHaveBeenCalled();
     expect(loadProfile).not.toHaveBeenCalled();
+    expect(createBrowser).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['navigation URL', sessionFixture('malformed', { lastUrl: 'not a URL' })],
+    ['cookie partition key', sessionFixture('malformed', {
+      cookies: [{
+        name: 'sid',
+        value: '123',
+        domain: 'example.com',
+        path: '/',
+        partitionKey: false,
+      }],
+    })],
+    ['cookie address', sessionFixture('malformed', {
+      cookies: [{
+        name: 'sid',
+        value: '123',
+        url: 'https://example.com',
+        domain: 'example.com',
+        path: '/',
+      }],
+    })],
+  ])('rejects malformed persisted session %s before creating a browser', async (_label, session) => {
+    getSession.mockReturnValue(session);
+
+    await expect(launchBrowser({ session: 'malformed' })).rejects.toMatchObject({
+      name: 'ProfileError',
+      code: 8,
+    });
+
+    expect(acquireStateLocks).not.toHaveBeenCalled();
     expect(createBrowser).not.toHaveBeenCalled();
   });
 
@@ -525,7 +649,7 @@ describe('browser state persistence', () => {
     vi.clearAllMocks();
     acquireStateLocks.mockReset().mockImplementation((opts) => createStateLease(opts));
     loadProfile.mockReset().mockReturnValue(DEFAULT_PROFILE);
-    getSession.mockReset().mockReturnValue({ profile: null });
+    getSession.mockReset().mockImplementation((name) => sessionFixture(name));
     restoreSession.mockReset().mockResolvedValue({ lastUrl: null, history: [], profile: null });
     saveProfileCookies.mockReset().mockReturnValue(1);
     saveSessionSnapshot.mockReset().mockReturnValue({
@@ -709,7 +833,7 @@ describe('closeBrowser', () => {
     vi.clearAllMocks();
     acquireStateLocks.mockReset().mockImplementation((opts) => createStateLease(opts));
     loadProfile.mockReset().mockReturnValue(DEFAULT_PROFILE);
-    getSession.mockReset().mockReturnValue({ profile: null });
+    getSession.mockReset().mockImplementation((name) => sessionFixture(name));
     restoreSession.mockReset().mockResolvedValue({ lastUrl: null, history: [], profile: null });
     saveProfileCookies.mockReset().mockReturnValue(1);
     saveSessionSnapshot.mockReset().mockReturnValue({ cookies: [], lastUrl: null });
@@ -921,6 +1045,71 @@ describe('closeBrowser', () => {
     expect(stateLease).toHaveBeenCalledTimes(2);
   });
 
+  it('should create separate strict errors for concurrent callers without mutating cached persistence', async () => {
+    const cleanupError = new Error('browser busy');
+    const mocks = setupMockBrowser();
+    mocks.mockContext.cookies.mockRejectedValue(new Error('capture unavailable'));
+    mocks.mockBrowser.close
+      .mockRejectedValueOnce(cleanupError)
+      .mockResolvedValueOnce(undefined);
+    mocks.mockBrowser.isConnected.mockReturnValue(true);
+    const { handle } = await launchStatefulBrowser({ profile: 'work' }, mocks);
+
+    const settled = await Promise.allSettled([
+      closeBrowser(handle, { strict: true }),
+      closeBrowser(handle, { strict: true }),
+    ]);
+    const failures = settled.map((entry) => entry.reason);
+
+    expect(settled.map((entry) => entry.status)).toEqual(['rejected', 'rejected']);
+    expect(failures[0]).not.toBe(failures[1]);
+    expect(failures[0]).toMatchObject({
+      name: 'PersistenceError',
+      cause: expect.objectContaining({ name: 'PersistenceError' }),
+      cleanupFailures: [{ target: 'browser', error: cleanupError }],
+    });
+    expect(failures[1].cause).toBe(failures[0].cause);
+    expect(failures[0].cause.cleanupFailures).toEqual([]);
+    expect(Object.getOwnPropertyDescriptor(failures[0], 'cause')?.enumerable).toBe(false);
+
+    await expect(closeBrowser(handle)).resolves.toMatchObject({ cleanupErrors: [] });
+  });
+
+  it('should not report stale cleanup failures after a strict retry succeeds', async () => {
+    const cleanupError = new Error('browser busy');
+    const mocks = setupMockBrowser();
+    mocks.mockContext.cookies.mockRejectedValue(new Error('capture unavailable'));
+    mocks.mockBrowser.close
+      .mockRejectedValueOnce(cleanupError)
+      .mockResolvedValueOnce(undefined);
+    mocks.mockBrowser.isConnected.mockReturnValue(true);
+    const { handle } = await launchStatefulBrowser({ profile: 'work' }, mocks);
+
+    let firstFailure;
+    try {
+      await closeBrowser(handle, { strict: true });
+    } catch (error) {
+      firstFailure = error;
+    }
+    const cachedPersistenceError = firstFailure.cause;
+
+    let retryFailure;
+    try {
+      await closeBrowser(handle, { strict: true });
+    } catch (error) {
+      retryFailure = error;
+    }
+
+    expect(firstFailure.cleanupFailures).toEqual([
+      { target: 'browser', error: cleanupError },
+    ]);
+    expect(retryFailure).toBe(cachedPersistenceError);
+    expect(retryFailure.cleanupFailures).toEqual([]);
+    expect(retryFailure.format()).not.toContain('Cleanup incomplete');
+    expect(mocks.mockContext.cookies).toHaveBeenCalledOnce();
+    expect(mocks.mockBrowser.close).toHaveBeenCalledTimes(2);
+  });
+
   it('should preserve an exact state-lock hint when strict persistence and cleanup both fail', async () => {
     const exactHint = 'After confirming no stealth process is using this state, remove this exact lock file: /tmp/locks/abc.lock';
     const stateLease = createStateLease({ profile: 'work' });
@@ -949,8 +1138,10 @@ describe('closeBrowser', () => {
 
     expect(failure).toMatchObject({
       name: 'PersistenceError',
+      cause: expect.objectContaining({ name: 'PersistenceError' }),
       cleanupFailures: [expect.objectContaining({ target: 'state-lock' })],
     });
+    expect(failure.cause.cleanupFailures).toEqual([]);
     expect(failure.format()).toContain(exactHint);
     expect(JSON.stringify(failure)).toContain(exactHint);
     expect(JSON.stringify(failure)).not.toContain('cleanup-secret');

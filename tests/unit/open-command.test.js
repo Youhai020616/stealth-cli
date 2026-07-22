@@ -18,7 +18,8 @@ vi.mock('../../src/browser.js', () => ({
   waitForReady: vi.fn(),
 }));
 
-vi.mock('../../src/browser-lifecycle.js', () => ({
+vi.mock('../../src/browser-lifecycle.js', async (importOriginal) => ({
+  ...await importOriginal(),
   DEFAULT_CHECKPOINT_INTERVAL: 1000,
   createBrowserLifecycle: vi.fn(),
   createLaunchSignalGuard: vi.fn(() => ({
@@ -51,6 +52,7 @@ import {
 import {
   BrowserLaunchError,
   NavigationError,
+  PersistenceError,
   ProfileError,
   attachCleanupFailures,
 } from '../../src/errors.js';
@@ -72,7 +74,9 @@ function lifecycleResult(overrides = {}) {
     },
     persistedAt: new Date().toISOString(),
     usedCheckpointFallback: false,
-    cleanup: { cleanupErrors: [] },
+    persistenceIncomplete: false,
+    finalCaptureError: null,
+    cleanup: { persistenceError: null, cleanupErrors: [] },
     cleanupErrors: [],
     ...overrides,
   };
@@ -247,6 +251,95 @@ describe('open command', () => {
     expect(primaryError.format()).toContain(exactHint);
     expect(primaryError.format()).not.toContain('primary-secret');
     expect(primaryError.format()).not.toContain('cleanup-secret');
+  });
+
+  it('attaches complete lifecycle evidence when command-error persistence is incomplete', async () => {
+    const primaryError = new NavigationError(
+      'https://example.com/callback?token=primary-secret',
+      new Error('navigation failed'),
+    );
+    const finalCaptureError = new Error(
+      'capture failed at https://example.com/callback?token=capture-secret',
+    );
+    const cleanupError = new Error(
+      'cleanup failed at https://example.com/callback?token=cleanup-secret',
+    );
+    const result = lifecycleResult({
+      reason: 'command-error',
+      exitCode: 8,
+      persistenceIncomplete: true,
+      finalCaptureError,
+      cleanupErrors: [{ target: 'browser', error: cleanupError }],
+      cleanup: {
+        persistenceError: null,
+        cleanupErrors: [{ target: 'browser', error: cleanupError }],
+      },
+    });
+    const requestExit = vi.fn().mockResolvedValue(result);
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'running',
+      start: vi.fn(),
+      wait: vi.fn(),
+      requestExit,
+    });
+    navigate.mockRejectedValue(primaryError);
+
+    await expect(runOpen('https://example.com', {
+      profile: 'work',
+      checkpointInterval: 1000,
+    })).rejects.toBe(primaryError);
+
+    expect(primaryError.cleanupFailures).toHaveLength(1);
+    const persistenceFailure = primaryError.cleanupFailures[0];
+    expect(persistenceFailure).toMatchObject({
+      target: 'persistence',
+      error: {
+        name: 'PersistenceError',
+        cause: finalCaptureError,
+        cleanupFailures: [{ target: 'browser', error: cleanupError }],
+      },
+    });
+    expect(persistenceFailure.error.lifecycleResult).toBe(result);
+    expect(Object.getOwnPropertyDescriptor(
+      persistenceFailure.error,
+      'lifecycleResult',
+    )?.enumerable).toBe(false);
+    const serialized = JSON.stringify(primaryError);
+    expect(serialized).not.toContain('primary-secret');
+    expect(serialized).not.toContain('capture-secret');
+    expect(serialized).not.toContain('cleanup-secret');
+  });
+
+  it('attaches a lifecycle PersistenceError whole, including its cleanup evidence', async () => {
+    const primaryError = new NavigationError('https://example.com', new Error('navigation failed'));
+    const cleanupError = new Error('browser still connected');
+    const lifecycleError = new PersistenceError('final persistence failed', {
+      cause: new Error('capture unavailable'),
+      cleanupFailures: [{ target: 'browser', error: cleanupError }],
+      failures: [{ target: 'profile', name: 'work' }],
+      results: { profile: null, session: null },
+    });
+    const requestExit = vi.fn().mockRejectedValue(lifecycleError);
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'running',
+      start: vi.fn(),
+      wait: vi.fn(),
+      requestExit,
+    });
+    navigate.mockRejectedValue(primaryError);
+
+    await expect(runOpen('https://example.com', {
+      profile: 'work',
+      checkpointInterval: 1000,
+    })).rejects.toBe(primaryError);
+
+    expect(primaryError.cleanupFailures).toEqual([
+      { target: 'persistence', error: lifecycleError },
+    ]);
+    expect(primaryError.cleanupFailures[0].error).toBe(lifecycleError);
+    expect(lifecycleError.cleanupFailures).toEqual([
+      { target: 'browser', error: cleanupError },
+    ]);
   });
 
   it('preserves launch cleanup failures when a pending signal replaces the launch error', async () => {

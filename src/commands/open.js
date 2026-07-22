@@ -12,9 +12,11 @@ import {
 import {
   createBrowserLifecycle,
   createLaunchSignalGuard,
+  createLifecyclePersistenceCleanupFailure,
   DEFAULT_CHECKPOINT_INTERVAL,
 } from '../browser-lifecycle.js';
 import {
+  PersistenceError,
   StealthError,
   attachCleanupFailures,
   formatCleanupFailures,
@@ -168,14 +170,23 @@ export async function runOpen(positionalUrl, opts) {
         if (result.reason !== 'command-error') {
           return reportLifecycleResult(result, hasPersistenceTarget);
         }
-        cleanupFailures.push(...(result.cleanupErrors || []));
+        const persistenceFailure = createLifecyclePersistenceCleanupFailure(result);
+        if (persistenceFailure) {
+          cleanupFailures.push(persistenceFailure);
+        } else {
+          cleanupFailures.push(...(result.cleanupErrors || []));
+        }
       } catch (cleanupError) {
         if (cleanupError !== error) {
-          cleanupFailures.push(...(
-            cleanupError.cleanupFailures?.length > 0
-              ? cleanupError.cleanupFailures
-              : [{ target: 'lifecycle', error: cleanupError }]
-          ));
+          if (cleanupError instanceof PersistenceError) {
+            cleanupFailures.push({ target: 'persistence', error: cleanupError });
+          } else {
+            cleanupFailures.push(...(
+              cleanupError.cleanupFailures?.length > 0
+                ? cleanupError.cleanupFailures
+                : [{ target: 'lifecycle', error: cleanupError }]
+            ));
+          }
         }
       }
     } else if (handle) {

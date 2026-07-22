@@ -121,18 +121,19 @@ describe('profiles', () => {
       httpOnly: true,
       secure: true,
       sameSite: 'None',
+      partitionKey: 'https://top.example',
     };
     writeProfileFixture(`${name}.json`, {
       ...profileFixture(name),
       fingerprint: {
         ...profileFixture(name).fingerprint,
-        geo: { latitude: -90, longitude: 180 },
+        geo: { latitude: -90, longitude: 180, accuracy: 0 },
       },
       cookies: [cookie],
     });
 
     expect(loadProfile(name)).toMatchObject({
-      fingerprint: { geo: { latitude: -90, longitude: 180 } },
+      fingerprint: { geo: { latitude: -90, longitude: 180, accuracy: 0 } },
       cookies: [cookie],
     });
   });
@@ -146,7 +147,9 @@ describe('profiles', () => {
     };
     const malformedProfiles = [
       (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, locale: ' ' } }),
+      (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, locale: 'en_US' } }),
       (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, timezone: null } }),
+      (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, timezone: 'Mars/Olympus' } }),
       (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, viewport: null } }),
       (profile) => ({
         ...profile,
@@ -160,6 +163,20 @@ describe('profiles', () => {
         fingerprint: {
           ...profile.fingerprint,
           viewport: { ...profile.fingerprint.viewport, height: '720' },
+        },
+      }),
+      (profile) => ({
+        ...profile,
+        fingerprint: {
+          ...profile.fingerprint,
+          viewport: { ...profile.fingerprint.viewport, width: 1280.5 },
+        },
+      }),
+      (profile) => ({
+        ...profile,
+        fingerprint: {
+          ...profile.fingerprint,
+          viewport: { ...profile.fingerprint.viewport, width: 16_385 },
         },
       }),
       (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, os: 'android' } }),
@@ -178,15 +195,34 @@ describe('profiles', () => {
           geo: { latitude: 0, longitude: -180.1 },
         },
       }),
+      (profile) => ({
+        ...profile,
+        fingerprint: {
+          ...profile.fingerprint,
+          geo: { latitude: 0, longitude: 0, accuracy: -1 },
+        },
+      }),
       (profile) => ({ ...profile, proxy: {} }),
+      (profile) => ({ ...profile, proxy: 'http://proxy.example:8080/path' }),
       (profile) => ({ ...profile, cookies: [{ ...validCookie, name: ' ' }] }),
       (profile) => ({ ...profile, cookies: [{ ...validCookie, value: 123 }] }),
       (profile) => ({ ...profile, cookies: [{ name: 'sid', value: '123', url: 'not-a-url' }] }),
+      (profile) => ({
+        ...profile,
+        cookies: [{
+          name: 'sid',
+          value: '123',
+          url: 'https://example.com',
+          domain: '.example.com',
+          path: '/',
+        }],
+      }),
       (profile) => ({ ...profile, cookies: [{ name: 'sid', value: '123', domain: '.example.com' }] }),
       (profile) => ({ ...profile, cookies: [{ ...validCookie, expires: 'never' }] }),
       (profile) => ({ ...profile, cookies: [{ ...validCookie, httpOnly: 'true' }] }),
       (profile) => ({ ...profile, cookies: [{ ...validCookie, secure: 1 }] }),
       (profile) => ({ ...profile, cookies: [{ ...validCookie, sameSite: 'lax' }] }),
+      (profile) => ({ ...profile, cookies: [{ ...validCookie, partitionKey: 42 }] }),
     ];
 
     malformedProfiles.forEach((mutate, index) => {

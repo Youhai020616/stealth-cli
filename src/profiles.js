@@ -103,6 +103,7 @@ const VIEWPORTS = [
 const PROFILE_METADATA_MIGRATIONS = new WeakSet();
 const VALID_PROFILE_OSES = new Set(['macos', 'windows', 'linux']);
 const VALID_COOKIE_SAME_SITES = new Set(['Strict', 'Lax', 'None']);
+const MAX_VIEWPORT_DIMENSION = 16_384;
 
 const LOCALES = [
   { locale: 'en-US', tz: 'America/New_York', geo: { latitude: 40.7128, longitude: -74.006 } },
@@ -173,7 +174,46 @@ function isValidCookieUrl(value) {
   }
 }
 
-function isValidCookie(cookie) {
+function isValidLocale(value) {
+  if (!isNonEmptyString(value)) return false;
+  try {
+    return Intl.getCanonicalLocales(value).length === 1;
+  } catch {
+    return false;
+  }
+}
+
+function isValidTimezone(value) {
+  if (!isNonEmptyString(value)) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isValidProxy(value) {
+  if (!isNonEmptyString(value)) return false;
+  try {
+    const candidate = /^[a-z][a-z\d+.-]*:\/\//iu.test(value)
+      ? value
+      : `http://${value}`;
+    const parsed = new URL(candidate);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && parsed.hostname.length > 0
+      && parsed.pathname === '/'
+      && !parsed.search
+      && !parsed.hash;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate a cookie before it is persisted or passed to Playwright.
+ */
+export function isValidPersistedCookie(cookie) {
   if (
     !isPlainObject(cookie)
     || !isNonEmptyString(cookie.name)
@@ -185,14 +225,16 @@ function isValidCookie(cookie) {
   const hasUrl = Object.hasOwn(cookie, 'url');
   const hasDomain = Object.hasOwn(cookie, 'domain');
   const hasPath = Object.hasOwn(cookie, 'path');
-  if (hasUrl && !isValidCookieUrl(cookie.url)) return false;
-  if (
-    (hasDomain || hasPath)
-    && (!isNonEmptyString(cookie.domain) || !isNonEmptyString(cookie.path))
+  if (hasUrl) {
+    if (hasDomain || hasPath || !isValidCookieUrl(cookie.url)) return false;
+  } else if (
+    !hasDomain
+    || !hasPath
+    || !isNonEmptyString(cookie.domain)
+    || !isNonEmptyString(cookie.path)
   ) {
     return false;
   }
-  if (!hasUrl && !(hasDomain && hasPath)) return false;
 
   if (
     Object.hasOwn(cookie, 'expires')
@@ -209,19 +251,27 @@ function isValidCookie(cookie) {
   ) {
     return false;
   }
+  if (
+    Object.hasOwn(cookie, 'partitionKey')
+    && typeof cookie.partitionKey !== 'string'
+  ) {
+    return false;
+  }
   return true;
 }
 
 function isValidFingerprint(fingerprint) {
   if (
     !isPlainObject(fingerprint)
-    || !isNonEmptyString(fingerprint.locale)
-    || !isNonEmptyString(fingerprint.timezone)
+    || !isValidLocale(fingerprint.locale)
+    || !isValidTimezone(fingerprint.timezone)
     || !isPlainObject(fingerprint.viewport)
-    || !Number.isFinite(fingerprint.viewport.width)
+    || !Number.isInteger(fingerprint.viewport.width)
     || fingerprint.viewport.width <= 0
-    || !Number.isFinite(fingerprint.viewport.height)
+    || fingerprint.viewport.width > MAX_VIEWPORT_DIMENSION
+    || !Number.isInteger(fingerprint.viewport.height)
     || fingerprint.viewport.height <= 0
+    || fingerprint.viewport.height > MAX_VIEWPORT_DIMENSION
     || !VALID_PROFILE_OSES.has(fingerprint.os)
   ) {
     return false;
@@ -236,6 +286,10 @@ function isValidFingerprint(fingerprint) {
       || !Number.isFinite(fingerprint.geo.longitude)
       || fingerprint.geo.longitude < -180
       || fingerprint.geo.longitude > 180
+      || (
+        Object.hasOwn(fingerprint.geo, 'accuracy')
+        && (!Number.isFinite(fingerprint.geo.accuracy) || fingerprint.geo.accuracy < 0)
+      )
     ) {
       return false;
     }
@@ -250,13 +304,13 @@ function invalidProfile(name, cause) {
   });
 }
 
-function normalizeProfile(profile, canonicalName, requestedName = canonicalName) {
+export function validateStoredProfile(profile, canonicalName, requestedName = canonicalName) {
   if (
     !isPlainObject(profile)
     || !isValidFingerprint(profile.fingerprint)
-    || (profile.proxy !== null && typeof profile.proxy !== 'string')
+    || (profile.proxy !== null && !isValidProxy(profile.proxy))
     || !Array.isArray(profile.cookies)
-    || !profile.cookies.every(isValidCookie)
+    || !profile.cookies.every(isValidPersistedCookie)
   ) {
     throw invalidProfile(requestedName);
   }
@@ -302,13 +356,13 @@ function readProfile(location, requestedName = location.name) {
     });
   }
 
-  const normalized = normalizeProfile(profile, location.name, requestedName);
+  const normalized = validateStoredProfile(profile, location.name, requestedName);
   if (profile.name !== normalized.name) PROFILE_METADATA_MIGRATIONS.add(normalized);
   return normalized;
 }
 
 function writeProfile(location, profile, requestedName = location.name) {
-  const normalized = normalizeProfile(profile, location.name, requestedName);
+  const normalized = validateStoredProfile(profile, location.name, requestedName);
   try {
     writeJsonAtomic(location.filePath, normalized);
     PROFILE_METADATA_MIGRATIONS.delete(profile);
@@ -450,7 +504,7 @@ export function touchProfile(name, opts = {}) {
  * @returns {number} Number of cookies in the snapshot
  */
 export function saveProfileCookies(name, cookies, opts = {}) {
-  if (!Array.isArray(cookies) || !cookies.every(isValidCookie)) {
+  if (!Array.isArray(cookies) || !cookies.every(isValidPersistedCookie)) {
     throw new ProfileError(`Cannot save profile "${name}": invalid cookie snapshot`);
   }
 

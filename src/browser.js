@@ -15,11 +15,13 @@ import {
   touchProfile,
   saveProfileCookies,
   loadCookiesFromProfile,
+  validateStoredProfile,
 } from "./profiles.js";
 import {
   getSession,
   restoreSession,
   saveSessionSnapshot,
+  validateStoredSession,
 } from "./session.js";
 import { getNextProxy } from "./proxy-pool.js";
 import {
@@ -164,7 +166,9 @@ export async function launchBrowser(opts = {}) {
 
   // A linked session carries its profile identity even when --profile is not
   // repeated. Re-read it after locking before trusting any mutable state.
-  let sessionMetadata = sessionName ? getSession(sessionName) : null;
+  let sessionMetadata = sessionName
+    ? validateStoredSession(getSession(sessionName), sessionName)
+    : null;
   const preLockLinkedProfileName = sessionMetadata?.profile
     ? assertStateName(sessionMetadata.profile, "Profile")
     : null;
@@ -181,7 +185,7 @@ export async function launchBrowser(opts = {}) {
 
   try {
     if (sessionName) {
-      sessionMetadata = getSession(sessionName);
+      sessionMetadata = validateStoredSession(getSession(sessionName), sessionName);
       const linkedProfileName = sessionMetadata.profile
         ? assertStateName(sessionMetadata.profile, "Profile")
         : null;
@@ -202,11 +206,14 @@ export async function launchBrowser(opts = {}) {
 
     let profileData = null;
     if (profileName) {
-      profileData = loadProfile(profileName);
+      profileData = validateStoredProfile(loadProfile(profileName), profileName);
       const fp = profileData.fingerprint;
-      locale = fp.locale || locale;
-      timezone = fp.timezone || timezone;
-      viewport = fp.viewport || viewport;
+      locale = fp.locale;
+      timezone = fp.timezone;
+      viewport = {
+        width: fp.viewport.width,
+        height: fp.viewport.height,
+      };
       if (profileData.proxy && !proxyStr) proxyStr = profileData.proxy;
     }
 
@@ -251,10 +258,17 @@ export async function launchBrowser(opts = {}) {
     if (!proxy) {
       contextOptions.locale = locale;
       contextOptions.timezoneId = timezone;
-      contextOptions.geolocation = profileData?.fingerprint?.geo || {
-        latitude: 37.7749,
-        longitude: -122.4194,
-      };
+      const profileGeo = profileData?.fingerprint?.geo;
+      contextOptions.geolocation = profileGeo
+        ? {
+          latitude: profileGeo.latitude,
+          longitude: profileGeo.longitude,
+          ...(profileGeo.accuracy === undefined ? {} : { accuracy: profileGeo.accuracy }),
+        }
+        : {
+          latitude: 37.7749,
+          longitude: -122.4194,
+        };
     }
 
     context = await browser.newContext(contextOptions);
@@ -586,6 +600,20 @@ async function performCloseOperation(handle, state, persist) {
   };
 }
 
+function createStrictClosePersistenceError(persistenceError, cleanupErrors) {
+  const targets = cleanupErrors.map(({ target }) => target).join(', ');
+  return new PersistenceError(
+    `${persistenceError.message}; browser cleanup also failed (${targets})`,
+    {
+      cause: persistenceError,
+      cleanupFailures: cleanupErrors,
+      failures: persistenceError.failures,
+      results: persistenceError.results,
+      snapshotMetadata: persistenceError.snapshotMetadata,
+    },
+  );
+}
+
 /**
  * Safely close a browser, coalescing concurrent calls while allowing later
  * calls to retry resources whose cleanup did not complete.
@@ -623,7 +651,12 @@ export async function closeBrowser(handle, opts = {}) {
 
   const result = await state.inFlight;
   if (strict && result.persistenceError) {
-    attachCleanupFailures(result.persistenceError, result.cleanupErrors);
+    if (result.cleanupErrors.length > 0) {
+      throw createStrictClosePersistenceError(
+        result.persistenceError,
+        result.cleanupErrors,
+      );
+    }
     throw result.persistenceError;
   }
   if (strict && result.cleanupErrors.length > 0) {

@@ -427,6 +427,13 @@ describe('browser lifecycle', () => {
     expect(failure.message).toContain('cleanup also failed');
     expect(failure.cleanupFailures).toEqual(cleanupFailures);
     expect(failure.cleanupFailures[0].error).toBe(cleanupError);
+    expect(failure.lifecycleResult).toMatchObject({
+      reason: 'context-closed',
+      exitCode: 1,
+      cleanupErrors: cleanupFailures,
+    });
+    expect(failure.lifecycleResult.cleanupErrors[0].error).toBe(cleanupError);
+    expect(Object.getOwnPropertyDescriptor(failure, 'lifecycleResult')?.enumerable).toBe(false);
     expect(failure.format()).toContain(exactHint);
     const serialized = JSON.stringify(failure);
     expect(serialized).toContain(exactHint);
@@ -434,6 +441,7 @@ describe('browser lifecycle', () => {
     expect(serialized).not.toContain('cleanup-secret');
     expect(serialized).not.toContain('callback');
     expect(serialized).not.toContain('state lock release failed');
+    expect(serialized).not.toContain('lifecycleResult');
   });
 
   it('should coalesce slow checkpoints and run a fresh final checkpoint', async () => {

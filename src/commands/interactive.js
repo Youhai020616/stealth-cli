@@ -23,6 +23,7 @@ import {
 import {
   createBrowserLifecycle,
   createLaunchSignalGuard,
+  createLifecyclePersistenceCleanupFailure,
 } from "../browser-lifecycle.js";
 import { expandMacro, getSupportedEngines } from "../macros.js";
 import {
@@ -34,6 +35,7 @@ import {
 import { log } from "../output.js";
 import { resolveOpts } from "../utils/resolve-opts.js";
 import {
+  PersistenceError,
   StealthError,
   attachCleanupFailures,
   formatCleanupFailures,
@@ -498,14 +500,23 @@ export function registerInteractive(program) {
               applyLifecycleResult(result);
               return;
             }
-            cleanupFailures.push(...(result.cleanupErrors || []));
+            const persistenceFailure = createLifecyclePersistenceCleanupFailure(result);
+            if (persistenceFailure) {
+              cleanupFailures.push(persistenceFailure);
+            } else {
+              cleanupFailures.push(...(result.cleanupErrors || []));
+            }
           } catch (lifecycleError) {
             if (lifecycleError !== err) {
-              cleanupFailures.push(...(
-                lifecycleError.cleanupFailures?.length > 0
-                  ? lifecycleError.cleanupFailures
-                  : [{ target: "lifecycle", error: lifecycleError }]
-              ));
+              if (lifecycleError instanceof PersistenceError) {
+                cleanupFailures.push({ target: "persistence", error: lifecycleError });
+              } else {
+                cleanupFailures.push(...(
+                  lifecycleError.cleanupFailures?.length > 0
+                    ? lifecycleError.cleanupFailures
+                    : [{ target: "lifecycle", error: lifecycleError }]
+                ));
+              }
             }
           }
         } else if (handle) {

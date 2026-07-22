@@ -112,6 +112,7 @@ describe('session', () => {
       httpOnly: true,
       secure: true,
       sameSite: 'Strict',
+      partitionKey: 'https://top.example',
     };
 
     saveSession(name, sessionFixture({ name, cookies: [cookie] }));
@@ -357,15 +358,27 @@ describe('session', () => {
       (session) => ({ ...session, history: [42] }),
       (session) => ({ ...session, profile: 42 }),
       (session) => ({ ...session, lastUrl: {} }),
+      (session) => ({ ...session, lastUrl: 'not a URL' }),
       (session) => ({ ...session, name: 42 }),
       (session) => ({ ...session, cookies: [{ ...validCookie, name: '' }] }),
       (session) => ({ ...session, cookies: [{ ...validCookie, value: null }] }),
       (session) => ({ ...session, cookies: [{ name: 'sid', value: '123', url: '' }] }),
+      (session) => ({
+        ...session,
+        cookies: [{
+          name: 'sid',
+          value: '123',
+          url: 'https://example.com',
+          domain: '.example.com',
+          path: '/',
+        }],
+      }),
       (session) => ({ ...session, cookies: [{ name: 'sid', value: '123', path: '/' }] }),
       (session) => ({ ...session, cookies: [{ ...validCookie, expires: false }] }),
       (session) => ({ ...session, cookies: [{ ...validCookie, httpOnly: 1 }] }),
       (session) => ({ ...session, cookies: [{ ...validCookie, secure: 'false' }] }),
       (session) => ({ ...session, cookies: [{ ...validCookie, sameSite: 'invalid' }] }),
+      (session) => ({ ...session, cookies: [{ ...validCookie, partitionKey: false }] }),
     ];
 
     malformedSessions.forEach((mutate, index) => {

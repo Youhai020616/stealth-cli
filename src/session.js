@@ -12,6 +12,7 @@
 
 import fs from 'fs';
 import { ProfileError } from './errors.js';
+import { isValidPersistedCookie } from './profiles.js';
 import {
   ensurePrivateDirectory,
   ensurePrivateFile,
@@ -28,7 +29,6 @@ import {
 } from './utils/storage-paths.js';
 
 const SESSION_METADATA_MIGRATIONS = new WeakSet();
-const VALID_COOKIE_SAME_SITES = new Set(['Strict', 'Lax', 'None']);
 
 function ensureDir() {
   const root = getStealthHome();
@@ -80,54 +80,14 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-function isValidCookieUrl(value) {
+function isValidSessionUrl(value) {
   if (!isNonEmptyString(value)) return false;
   try {
-    const parsed = new URL(value);
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-      && parsed.hostname.length > 0;
+    new URL(value);
+    return true;
   } catch {
     return false;
   }
-}
-
-function isValidCookie(cookie) {
-  if (
-    !isPlainObject(cookie)
-    || !isNonEmptyString(cookie.name)
-    || typeof cookie.value !== 'string'
-  ) {
-    return false;
-  }
-
-  const hasUrl = Object.hasOwn(cookie, 'url');
-  const hasDomain = Object.hasOwn(cookie, 'domain');
-  const hasPath = Object.hasOwn(cookie, 'path');
-  if (hasUrl && !isValidCookieUrl(cookie.url)) return false;
-  if (
-    (hasDomain || hasPath)
-    && (!isNonEmptyString(cookie.domain) || !isNonEmptyString(cookie.path))
-  ) {
-    return false;
-  }
-  if (!hasUrl && !(hasDomain && hasPath)) return false;
-
-  if (
-    Object.hasOwn(cookie, 'expires')
-    && (typeof cookie.expires !== 'number' || !Number.isFinite(cookie.expires))
-  ) {
-    return false;
-  }
-  for (const field of ['httpOnly', 'secure']) {
-    if (Object.hasOwn(cookie, field) && typeof cookie[field] !== 'boolean') return false;
-  }
-  if (
-    Object.hasOwn(cookie, 'sameSite')
-    && !VALID_COOKIE_SAME_SITES.has(cookie.sameSite)
-  ) {
-    return false;
-  }
-  return true;
 }
 
 function invalidSession(name, cause) {
@@ -137,11 +97,11 @@ function invalidSession(name, cause) {
   });
 }
 
-function normalizeSession(session, canonicalName, requestedName = canonicalName) {
+export function validateStoredSession(session, canonicalName, requestedName = canonicalName) {
   if (
     !isPlainObject(session)
     || !Array.isArray(session.cookies)
-    || !session.cookies.every(isValidCookie)
+    || !session.cookies.every(isValidPersistedCookie)
     || !Array.isArray(session.history)
     || !session.history.every((entry) => typeof entry === 'string')
   ) {
@@ -167,10 +127,7 @@ function normalizeSession(session, canonicalName, requestedName = canonicalName)
     }
   }
 
-  if (
-    session.lastUrl !== null
-    && (typeof session.lastUrl !== 'string' || session.lastUrl.trim().length === 0)
-  ) {
+  if (session.lastUrl !== null && !isValidSessionUrl(session.lastUrl)) {
     throw invalidSession(requestedName);
   }
 
@@ -209,7 +166,7 @@ function readSession(location, requestedName = location.name) {
     });
   }
 
-  const normalized = normalizeSession(session, location.name, requestedName);
+  const normalized = validateStoredSession(session, location.name, requestedName);
   if (session.name !== normalized.name || session.profile !== normalized.profile) {
     SESSION_METADATA_MIGRATIONS.add(normalized);
   }
@@ -218,7 +175,7 @@ function readSession(location, requestedName = location.name) {
 
 function writeSession(location, session, requestedName = location.name) {
   const normalized = {
-    ...normalizeSession(session, location.name, requestedName),
+    ...validateStoredSession(session, location.name, requestedName),
     lastAccess: new Date().toISOString(),
   };
   try {
@@ -271,14 +228,14 @@ export function saveSessionSnapshot(name, snapshot, opts = {}) {
   if (!isPlainObject(snapshot) || !Array.isArray(snapshot.cookies)) {
     throw new ProfileError(`Cannot save session "${name}": invalid cookie snapshot`);
   }
-  if (!snapshot.cookies.every(isValidCookie)) {
+  if (!snapshot.cookies.every(isValidPersistedCookie)) {
     throw new ProfileError(`Cannot save session "${name}": invalid cookie snapshot`);
   }
   if (
     Object.hasOwn(snapshot, 'lastUrl')
     && snapshot.lastUrl !== undefined
     && snapshot.lastUrl !== null
-    && (typeof snapshot.lastUrl !== 'string' || snapshot.lastUrl.trim().length === 0)
+    && !isValidSessionUrl(snapshot.lastUrl)
   ) {
     throw new ProfileError(`Cannot save session "${name}": invalid last URL`);
   }
