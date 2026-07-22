@@ -423,6 +423,40 @@ describe('state lock journals', () => {
     expect(fs.readFileSync(journalPath, 'utf8')).toBe(contents);
   });
 
+  it('rejects an orphan release token without modifying the journal', () => {
+    const orphan = releaseRecord(crypto.randomUUID());
+    const journalPath = writeJournal('session', 'orphan-release', [orphan]);
+    const contents = fs.readFileSync(journalPath, 'utf8');
+
+    let error;
+    try {
+      acquireStateLocks({ session: 'orphan-release' });
+    } catch (cause) {
+      error = cause;
+    }
+
+    expect(error?.message).toContain('invalid lock journal');
+    expect(error?.hint).toBe(journalRemovalHint(journalPath));
+    expect(fs.readFileSync(journalPath, 'utf8')).toBe(contents);
+  });
+
+  it('accepts duplicate releases when their claim appeared earlier', () => {
+    const claim = claimRecord('profile', 'duplicate-release');
+    const journalPath = writeJournal('profile', 'duplicate-release', [
+      claim,
+      releaseRecord(claim.token),
+      releaseRecord(claim.token),
+    ]);
+
+    const lease = acquireStateLocks({ profile: 'duplicate-release' });
+    expect(lease.owns('profile', 'duplicate-release')).toBe(true);
+    lease();
+
+    const records = readJournalRecords(journalPath);
+    expect(records.filter(({ token }) => token === claim.token)).toHaveLength(3);
+    expect(activeClaims(records)).toEqual([]);
+  });
+
   it('rejects claim history bound to a different root, kind, or canonical name', () => {
     const cases = [
       claimRecord('profile', 'bound', { root: temporaryStealthHome('wrong-binding') }),
@@ -468,7 +502,51 @@ describe('state lock journals', () => {
     expect(readJournalRecords(journalPath).map(({ op }) => op)).toEqual(['claim', 'release']);
   });
 
-  it('retries an unconfirmed fsync and an old-token release cannot affect a successor', () => {
+  it('retries cleanup after a transient lstat verification failure', () => {
+    const lease = acquireStateLocks({ profile: 'lstat-retry' });
+    const journalPath = stateLockPath('profile', 'lstat-retry');
+    const lstatSync = fs.lstatSync.bind(fs);
+    let failed = false;
+
+    vi.spyOn(fs, 'lstatSync').mockImplementation((target, ...args) => {
+      if (!failed && target === journalPath) {
+        failed = true;
+        const error = new Error('transient lstat failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return lstatSync(target, ...args);
+    });
+
+    expect(() => lease()).toThrow('ownership could not be verified');
+    expect(lease.owns('profile', 'lstat-retry')).toBe(false);
+    expect(activeClaims(readJournalRecords(journalPath))).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    lease();
+    expect(activeClaims(readJournalRecords(journalPath))).toEqual([]);
+    expect(readJournalRecords(journalPath).map(({ op }) => op)).toEqual(['claim', 'release']);
+  });
+
+  it('retries cleanup after a transient ownership-read failure revokes authorization', () => {
+    const lease = acquireStateLocks({ session: 'read-retry' });
+    const journalPath = stateLockPath('session', 'read-retry');
+    vi.spyOn(fs, 'readSync').mockImplementationOnce(() => {
+      const error = new Error('transient read failure');
+      error.code = 'EIO';
+      throw error;
+    });
+
+    expect(lease.owns('session', 'read-retry')).toBe(false);
+    expect(activeClaims(readJournalRecords(journalPath))).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    lease();
+    expect(activeClaims(readJournalRecords(journalPath))).toEqual([]);
+    expect(readJournalRecords(journalPath).map(({ op }) => op)).toEqual(['claim', 'release']);
+  });
+
+  it('revokes ownership on release publication and retries only fsync before close', () => {
     const oldLease = acquireStateLocks({ session: 'login' });
     const journalPath = stateLockPath('session', 'login');
     const oldToken = readJournalRecords(journalPath)[0].token;
@@ -486,23 +564,37 @@ describe('state lock journals', () => {
     });
 
     expect(() => oldLease()).toThrow('transient fsync failure');
-    expect(oldLease.owns('session', 'login')).toBe(true);
+    expect(oldLease.owns('session', 'login')).toBe(false);
     expect(activeClaims(readJournalRecords(journalPath))).toEqual([]);
+    expect(
+      readJournalRecords(journalPath)
+        .filter((record) => record.op === 'release' && record.token === oldToken),
+    ).toHaveLength(1);
 
     vi.restoreAllMocks();
     const successor = acquireStateLocks({ session: 'login' });
     const successorClaim = activeClaims(readJournalRecords(journalPath))[0];
     expect(successorClaim.token).not.toBe(oldToken);
+    expect(successor.owns('session', 'login')).toBe(true);
+    const contentsBeforeRetry = fs.readFileSync(journalPath, 'utf8');
+    const retryWrite = vi.spyOn(fs, 'writeSync');
+    const retryFsync = vi.spyOn(fs, 'fsyncSync');
 
     oldLease();
+    oldLease();
+
+    expect(retryWrite).not.toHaveBeenCalled();
+    expect(retryFsync).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(journalPath, 'utf8')).toBe(contentsBeforeRetry);
     expect(oldLease.owns('session', 'login')).toBe(false);
     expect(successor.owns('session', 'login')).toBe(true);
     expect(activeClaims(readJournalRecords(journalPath))).toEqual([successorClaim]);
     expect(
       readJournalRecords(journalPath)
         .filter((record) => record.op === 'release' && record.token === oldToken),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
 
+    vi.restoreAllMocks();
     successor();
   });
 

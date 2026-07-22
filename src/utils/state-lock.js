@@ -417,7 +417,7 @@ function parseJournal(target, opened, bytes) {
       claims.set(record.token, claim);
       active.set(record.token, claim);
     } else if (record?.op === 'release') {
-      if (!validRelease(record)) {
+      if (!validRelease(record) || !claims.has(record.token)) {
         throw invalidJournalError(
           `State lock journal contains an invalid release at line ${index + 1}: ${opened.journalPath}`,
         );
@@ -542,87 +542,52 @@ function closeFailure(target, journalPath, cause) {
   );
 }
 
-function inspectReplacement(target, journalPath, token) {
-  let replacement;
-  let result;
-  let failure;
-
-  try {
-    replacement = openJournal(target, { create: false });
-    result = readJournal(target, replacement).claims.has(token);
-  } catch (cause) {
-    if (cause?.cause?.code === 'ENOENT' || cause?.code === 'ENOENT') return false;
-    failure = cause;
-  }
-
-  if (replacement) {
-    try {
-      closeOpenedJournal(replacement);
-    } catch (cause) {
-      if (!failure) failure = closeFailure(target, journalPath, cause);
-      else attachStateCleanupFailures(failure, [cleanupEntry(target, cause)]);
-    }
-  }
-
-  if (failure) throw failure;
-  return result;
-}
-
 function createRelease(record) {
-  let authorizationActive = true;
-  let releasePending = false;
-  let cleanupComplete = false;
+  let writeAuthorized = true;
+  let releasePublished = false;
+  let releaseDurable = false;
+  let descriptorCleanupComplete = false;
 
   function finishClose() {
-    if (cleanupComplete) return;
+    if (descriptorCleanupComplete) return;
     try {
       closeOpenedJournal(record.opened);
-      cleanupComplete = true;
+      descriptorCleanupComplete = true;
     } catch (cause) {
       throw closeFailure(record.target, record.opened.journalPath, cause);
     }
   }
 
-  function clearForReplacement(status) {
-    authorizationActive = false;
-    let replacementContainsToken = false;
-    let inspectionFailure;
+  function verificationFailure(cause) {
+    writeAuthorized = false;
+    return new ProfileError(
+      `${record.target.kind} "${record.target.name}" lock ownership could not be verified`,
+      { hint: manualRemovalHint(record.opened.journalPath), cause },
+    );
+  }
 
-    if (status === 'replaced') {
-      try {
-        replacementContainsToken = inspectReplacement(
-          record.target,
-          record.opened.journalPath,
-          record.token,
-        );
-      } catch (cause) {
-        inspectionFailure = cause;
-      }
-    }
-
+  function confirmReleaseDurability() {
+    if (!releasePublished || releaseDurable) return;
     try {
-      finishClose();
+      fs.fsyncSync(record.opened.descriptor);
+      releaseDurable = true;
     } catch (cause) {
-      if (!inspectionFailure) inspectionFailure = cause;
-      else attachStateCleanupFailures(inspectionFailure, [cleanupEntry(record.target, cause)]);
+      throw releaseFailure(record.target, record.opened.journalPath, cause);
     }
+  }
 
-    if (inspectionFailure) throw inspectionFailure;
-    if (replacementContainsToken) {
-      throw new ProfileError(
-        `${record.target.kind} "${record.target.name}" lock journal was replaced while still containing its token`,
-        { hint: manualRemovalHint(record.opened.journalPath) },
-      );
-    }
+  function finishPublishedRelease() {
+    confirmReleaseDurability();
+    finishClose();
   }
 
   return {
     isActive() {
-      if (!authorizationActive) return false;
+      if (!writeAuthorized || releasePublished) return false;
 
       try {
         if (journalPathStatus(record.opened) !== 'same') {
-          authorizationActive = false;
+          writeAuthorized = false;
           try {
             finishClose();
           } catch {}
@@ -632,24 +597,26 @@ function createRelease(record) {
         const journal = readJournal(record.target, record.opened);
         const claim = journal.claims.get(record.token);
         if (!claim) {
-          authorizationActive = false;
+          writeAuthorized = false;
           return false;
         }
-        if (releasePending) return true;
 
         const active = journal.activeClaims.some(({ token }) => token === record.token);
-        if (!active) authorizationActive = false;
+        if (!active) {
+          writeAuthorized = false;
+          releasePublished = true;
+        }
         return active;
       } catch {
-        authorizationActive = false;
+        writeAuthorized = false;
         return false;
       }
     },
 
     release() {
-      if (cleanupComplete) return;
-      if (!authorizationActive) {
-        finishClose();
+      if (descriptorCleanupComplete) return;
+      if (releasePublished) {
+        finishPublishedRelease();
         return;
       }
 
@@ -657,14 +624,11 @@ function createRelease(record) {
       try {
         status = journalPathStatus(record.opened);
       } catch (cause) {
-        authorizationActive = false;
-        throw new ProfileError(
-          `${record.target.kind} "${record.target.name}" lock ownership could not be verified`,
-          { hint: manualRemovalHint(record.opened.journalPath), cause },
-        );
+        throw verificationFailure(cause);
       }
       if (status !== 'same') {
-        clearForReplacement(status);
+        writeAuthorized = false;
+        finishClose();
         return;
       }
 
@@ -672,24 +636,21 @@ function createRelease(record) {
       try {
         journal = readJournal(record.target, record.opened);
       } catch (cause) {
-        authorizationActive = false;
-        throw new ProfileError(
-          `${record.target.kind} "${record.target.name}" lock ownership could not be verified`,
-          { hint: manualRemovalHint(record.opened.journalPath), cause },
-        );
+        throw verificationFailure(cause);
       }
 
       const claim = journal.claims.get(record.token);
       if (!claim) {
-        authorizationActive = false;
+        writeAuthorized = false;
         finishClose();
         return;
       }
 
       const claimIsActive = journal.activeClaims.some(({ token }) => token === record.token);
-      if (!claimIsActive && !releasePending) {
-        authorizationActive = false;
-        finishClose();
+      if (!claimIsActive) {
+        writeAuthorized = false;
+        releasePublished = true;
+        finishPublishedRelease();
         return;
       }
 
@@ -697,12 +658,17 @@ function createRelease(record) {
       try {
         appendRecord(record.target, record.opened, releaseRecord(record.token), progress);
       } catch (cause) {
-        if (progress.complete) releasePending = true;
+        if (progress.complete) {
+          writeAuthorized = false;
+          releasePublished = true;
+          releaseDurable = progress.synced === true;
+        }
         throw releaseFailure(record.target, record.opened.journalPath, cause);
       }
 
-      authorizationActive = false;
-      releasePending = false;
+      writeAuthorized = false;
+      releasePublished = true;
+      releaseDurable = true;
       finishClose();
     },
   };

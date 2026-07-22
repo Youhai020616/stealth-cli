@@ -36,6 +36,7 @@ import {
   NavigationError,
   PersistenceError,
   ProfileError,
+  ProxyError,
   attachCleanupFailures,
   safeUrlForDisplay,
 } from "./errors.js";
@@ -108,21 +109,27 @@ function buildProxy(proxyStr) {
   if (!proxyStr) return null;
 
   try {
-    let url;
-    if (proxyStr.startsWith("http")) {
-      url = new URL(proxyStr);
-    } else {
-      url = new URL(`http://${proxyStr}`);
+    const candidate = /^[a-z][a-z\d+.-]*:\/\//iu.test(proxyStr)
+      ? proxyStr
+      : `http://${proxyStr}`;
+    const url = new URL(candidate);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      !url.hostname ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash
+    ) {
+      throw new Error("Invalid proxy URL");
     }
 
     return {
-      server: `${url.protocol}//${url.hostname}:${url.port}`,
+      server: `${url.protocol}//${url.host}`,
       username: url.username || undefined,
       password: url.password || undefined,
     };
-  } catch {
-    const [host, port] = proxyStr.split(":");
-    return { server: `http://${host}:${port}` };
+  } catch (cause) {
+    throw new ProxyError(proxyStr, cause);
   }
 }
 

@@ -262,6 +262,24 @@ describe('launchBrowser', () => {
     expect(createBrowser).toHaveBeenCalled();
   });
 
+  it('should normalize an uppercase persisted proxy scheme consistently', async () => {
+    loadProfile.mockReturnValue({
+      ...DEFAULT_PROFILE,
+      proxy: 'HTTP://proxy.example:8080',
+    });
+    setupMockBrowser();
+
+    await launchBrowser({ profile: 'work' });
+
+    expect(createBrowser).toHaveBeenCalledWith(expect.objectContaining({
+      proxy: {
+        server: 'http://proxy.example:8080',
+        username: undefined,
+        password: undefined,
+      },
+    }));
+  });
+
   it('should skip daemon when session is specified', async () => {
     isDaemonRunning.mockReturnValue(true);
     restoreSession.mockResolvedValue({ lastUrl: null, history: [] });
