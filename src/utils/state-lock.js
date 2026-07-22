@@ -192,6 +192,10 @@ function closeOpenedJournal(opened) {
       opened.descriptor = undefined;
       return;
     }
+    // close(2) may release the descriptor even when reporting an error. The
+    // persistent journal inode can then be reopened under the same numeric fd,
+    // so neither the number nor inode identity can authorize a later retry.
+    opened.descriptor = undefined;
     throw error;
   }
 }

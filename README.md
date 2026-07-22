@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D20-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-393%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-397%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -442,8 +442,8 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 ```
 Version:     0.6.1
 Commands:    17
-Tests:       393 passing (29 test files)
-Source:      11,776 lines (49 JavaScript files under `src/`)
+Tests:       397 passing (29 test files)
+Source:      11,793 lines (49 JavaScript files under `src/`)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)

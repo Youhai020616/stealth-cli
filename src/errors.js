@@ -250,11 +250,15 @@ export function formatCleanupFailures(value, prefix = 'Cleanup was incomplete') 
   const summaries = getCleanupTargetSummaries(value);
   if (summaries.length === 0) return null;
 
-  const targets = summaries.map(({ target }) => target).join(', ');
+  const targets = summaries
+    .map(({ target }) => safeTextForTerminal(target))
+    .join(', ');
   const hints = summaries
     .filter(({ hint }) => hint)
-    .map(({ target, hint }) => `  Hint for ${target}: ${hint}`);
-  return [`${prefix} (${targets})`, ...hints].join('\n');
+    .map(({ target, hint }) => (
+      `  Hint for ${safeTextForTerminal(target)}: ${safeTextForTerminal(hint)}`
+    ));
+  return [`${safeTextForTerminal(prefix)} (${targets})`, ...hints].join('\n');
 }
 
 export function attachCleanupFailures(error, failures) {

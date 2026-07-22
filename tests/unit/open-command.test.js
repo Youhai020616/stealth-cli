@@ -55,6 +55,7 @@ import {
   PersistenceError,
   ProfileError,
   attachCleanupFailures,
+  attachJsonCleanupDetails,
 } from '../../src/errors.js';
 import { log } from '../../src/output.js';
 import {
@@ -403,6 +404,43 @@ describe('open command', () => {
     });
 
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('latest checkpoint'));
+  });
+
+  it('reports an exact profile artifact when final persistence uses a checkpoint fallback', async () => {
+    const artifactPath = '/tmp/stealth/profiles/.work.json.999.claim';
+    const rawCleanupError = attachJsonCleanupDetails(
+      new Error('artifact-content-secret'),
+      {
+        status: 'pending',
+        artifacts: [{ operation: 'inspect', path: artifactPath }],
+      },
+    );
+    const finalCaptureError = new PersistenceError('Profile checkpoint failed', {
+      cause: rawCleanupError,
+    });
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'running',
+      start: vi.fn(),
+      wait: vi.fn().mockResolvedValue(lifecycleResult({
+        exitCode: 8,
+        usedCheckpointFallback: true,
+        persistenceIncomplete: true,
+        finalCaptureError,
+      })),
+      requestExit: vi.fn(),
+    });
+
+    await runOpen(undefined, {
+      profile: 'work',
+      checkpointInterval: 1000,
+    });
+
+    const output = log.warn.mock.calls.flat().join('\n');
+    expect(process.exitCode).toBe(8);
+    expect(output).toContain('latest checkpoint');
+    expect(output).toContain(JSON.stringify(artifactPath));
+    expect(output).toContain('remove only that exact path');
+    expect(output).not.toContain('artifact-content-secret');
   });
 
   it('should report cleanup failures with a non-zero exit status', async () => {

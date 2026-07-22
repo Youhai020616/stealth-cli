@@ -93,6 +93,7 @@ import {
   PersistenceError,
   ProfileError,
   attachCleanupFailures,
+  attachJsonCleanupDetails,
 } from '../../src/errors.js';
 import { log } from '../../src/output.js';
 
@@ -386,6 +387,53 @@ describe('interactive command', () => {
     expect(launchError.cleanupFailures).toEqual([
       { target: 'state-lock', error: cleanupError },
     ]);
+  });
+
+  it('reports an exact session artifact when final persistence uses a checkpoint fallback', async () => {
+    const artifactPath = '/tmp/stealth/sessions/.login.json.999.rollback';
+    const rawCleanupError = attachJsonCleanupDetails(
+      new Error('artifact-content-secret'),
+      {
+        status: 'pending',
+        artifacts: [{ operation: 'inspect', path: artifactPath }],
+      },
+    );
+    const finalCaptureError = new PersistenceError('Session checkpoint failed', {
+      cause: rawCleanupError,
+    });
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'closed',
+      start: vi.fn(),
+      wait: vi.fn().mockResolvedValue({
+        reason: 'last-page-closed',
+        signal: null,
+        exitCode: 8,
+        persistence: { profile: null, session: { name: 'login', cookies: 1 } },
+        persistedAt: new Date().toISOString(),
+        usedCheckpointFallback: true,
+        persistenceIncomplete: true,
+        finalCaptureError,
+        cleanup: { persistenceError: null, cleanupErrors: [] },
+        cleanupErrors: [],
+      }),
+      requestExit: vi.fn(),
+    });
+    const program = new Command();
+    program.exitOverride();
+    registerInteractive(program);
+
+    await program.parseAsync([
+      'interactive',
+      '--session',
+      'login',
+    ], { from: 'user' });
+
+    const output = log.warn.mock.calls.flat().join('\n');
+    expect(process.exitCode).toBe(8);
+    expect(output).toContain('using checkpoint');
+    expect(output).toContain(JSON.stringify(artifactPath));
+    expect(output).toContain('remove only that exact path');
+    expect(output).not.toContain('artifact-content-secret');
   });
 
   it('should preserve a signal result when cookie loading fails during finalization', async () => {

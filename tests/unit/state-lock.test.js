@@ -685,29 +685,33 @@ describe('state lock journals', () => {
     expect(() => lease()).not.toThrow();
   });
 
-  it('retains a failed replacement-inspection close across release retries', () => {
+  it('abandons an ambiguously closed inspection descriptor before fd reuse', () => {
     const oldLease = acquireStateLocks({ profile: 'inspection-close' });
     const journalPath = stateLockPath('profile', 'inspection-close');
     const displacedPath = `${journalPath}.displaced`;
     fs.renameSync(journalPath, displacedPath);
     const successor = acquireStateLocks({ profile: 'inspection-close' });
     const successorContents = fs.readFileSync(journalPath, 'utf8');
+    const unrelatedPath = `${journalPath}.unrelated`;
     const openSync = fs.openSync.bind(fs);
     const closeSync = fs.closeSync.bind(fs);
-    let inspectionDescriptor;
+    let ambiguousDescriptor;
     let inspectionOpenCount = 0;
+    let ambiguousCloseInjected = false;
 
     vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
       const descriptor = openSync(target, ...args);
       if (target === journalPath) {
-        inspectionDescriptor = descriptor;
+        if (ambiguousDescriptor === undefined) ambiguousDescriptor = descriptor;
         inspectionOpenCount += 1;
       }
       return descriptor;
     });
-    vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
-      if (descriptor === inspectionDescriptor) {
-        const error = new Error('replacement inspection close failed');
+    const closeSpy = vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+      if (descriptor === ambiguousDescriptor && !ambiguousCloseInjected) {
+        ambiguousCloseInjected = true;
+        closeSync(descriptor);
+        const error = new Error('replacement inspection close failed after release');
         error.code = 'EIO';
         throw error;
       }
@@ -716,40 +720,51 @@ describe('state lock journals', () => {
 
     expect(() => oldLease()).toThrow('could not be inspected safely');
     expect(inspectionOpenCount).toBe(1);
-    expect(() => oldLease()).toThrow('replacement inspection close failed');
-    expect(inspectionOpenCount).toBe(1);
+    const unrelatedDescriptor = fs.openSync(unrelatedPath, 'w+', 0o600);
+    expect(unrelatedDescriptor).toBe(ambiguousDescriptor);
+
+    expect(() => oldLease()).not.toThrow();
+    expect(inspectionOpenCount).toBeGreaterThanOrEqual(2);
+    expect(closeSpy.mock.calls.filter(([descriptor]) => (
+      descriptor === ambiguousDescriptor
+    ))).toHaveLength(1);
+    expect(fs.fstatSync(unrelatedDescriptor).isFile()).toBe(true);
     expect(oldLease.owns('profile', 'inspection-close')).toBe(false);
     expect(fs.readFileSync(journalPath, 'utf8')).toBe(successorContents);
 
     vi.restoreAllMocks();
-    expect(() => oldLease()).not.toThrow();
+    fs.closeSync(unrelatedDescriptor);
     expect(successor.owns('profile', 'inspection-close')).toBe(true);
     successor();
   });
 
-  it('retains a pre-validation inspection descriptor when its internal close fails', () => {
+  it('abandons an ambiguously closed pre-validation descriptor before fd reuse', () => {
     const lease = acquireStateLocks({ profile: 'inspection-validation-close' });
     const journalPath = stateLockPath('profile', 'inspection-validation-close');
     const displacedPath = `${journalPath}.displaced`;
     const claimContents = fs.readFileSync(journalPath, 'utf8');
     fs.renameSync(journalPath, displacedPath);
     fs.writeFileSync(journalPath, claimContents, { mode: 0o644 });
+    const unrelatedPath = `${journalPath}.unrelated`;
     const openSync = fs.openSync.bind(fs);
     const closeSync = fs.closeSync.bind(fs);
-    let inspectionDescriptor;
+    let ambiguousDescriptor;
     let inspectionOpenCount = 0;
+    let ambiguousCloseInjected = false;
 
     vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
       const descriptor = openSync(target, ...args);
       if (target === journalPath) {
-        inspectionDescriptor = descriptor;
+        if (ambiguousDescriptor === undefined) ambiguousDescriptor = descriptor;
         inspectionOpenCount += 1;
       }
       return descriptor;
     });
-    vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
-      if (descriptor === inspectionDescriptor) {
-        const error = new Error('pre-validation inspection close failed');
+    const closeSpy = vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+      if (descriptor === ambiguousDescriptor && !ambiguousCloseInjected) {
+        ambiguousCloseInjected = true;
+        closeSync(descriptor);
+        const error = new Error('pre-validation close failed after release');
         error.code = 'EIO';
         throw error;
       }
@@ -758,11 +773,19 @@ describe('state lock journals', () => {
 
     expect(() => lease()).toThrow('could not be inspected safely');
     expect(inspectionOpenCount).toBe(1);
-    expect(() => lease()).toThrow('pre-validation inspection close failed');
-    expect(inspectionOpenCount).toBe(1);
+    const unrelatedDescriptor = fs.openSync(unrelatedPath, 'w+', 0o600);
+    expect(unrelatedDescriptor).toBe(ambiguousDescriptor);
+
+    expect(() => lease()).toThrow('could not be inspected safely');
+    expect(inspectionOpenCount).toBeGreaterThanOrEqual(2);
+    expect(closeSpy.mock.calls.filter(([descriptor]) => (
+      descriptor === ambiguousDescriptor
+    ))).toHaveLength(1);
+    expect(fs.fstatSync(unrelatedDescriptor).isFile()).toBe(true);
     expect(lease.owns('profile', 'inspection-validation-close')).toBe(false);
 
     vi.restoreAllMocks();
+    fs.closeSync(unrelatedDescriptor);
     fs.rmSync(journalPath);
     expect(() => lease()).not.toThrow();
   });

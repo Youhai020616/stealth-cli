@@ -78,6 +78,27 @@ describe('closeBrowserForCli', () => {
     expect(logger.warn.mock.calls.flat().join('\n')).not.toContain('raw cleanup cause');
   });
 
+  it('escapes terminal controls in cleanup hints before logging', async () => {
+    const exactHint = 'Remove exact lock: /tmp/locks/abc.lock\nINJECTED\r\u001b[31mRED';
+    closeBrowser.mockResolvedValue({
+      persistence: null,
+      persistenceError: null,
+      cleanupErrors: [{
+        target: 'state-lock',
+        error: new ProfileError('lock release failed', { hint: exactHint }),
+      }],
+    });
+
+    await closeBrowserForCli({ isDaemon: false }, { log: logger });
+
+    const output = logger.warn.mock.calls.flat().join('\n');
+    expect(output).toContain('/tmp/locks/abc.lock\\u000aINJECTED');
+    expect(output).toContain('\\u000d\\u001b[31mRED');
+    expect(output).not.toContain('\nINJECTED');
+    expect(output).not.toContain('\r');
+    expect(output).not.toContain('\u001b');
+  });
+
   it('does not overwrite an earlier command failure', async () => {
     process.exitCode = 4;
     closeBrowser.mockResolvedValue({

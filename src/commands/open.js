@@ -64,6 +64,11 @@ function reportLifecycleResult(result, hasPersistenceTarget) {
     log.success(`Authentication state saved (${count} cookies)`);
   }
 
+  if (result.persistenceIncomplete) {
+    const persistenceFailure = createLifecyclePersistenceCleanupFailure(result);
+    if (persistenceFailure) log.warn(persistenceFailure.error.format());
+  }
+
   if (result.cleanupErrors?.length > 0) {
     log.warn(formatCleanupFailures(
       result.cleanupErrors,

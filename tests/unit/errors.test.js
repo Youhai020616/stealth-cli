@@ -13,6 +13,7 @@ import {
   BlockedError,
   attachCleanupFailures,
   attachJsonCleanupDetails,
+  formatCleanupFailures,
   handleError,
   safeUrlForDisplay,
 } from '../../src/errors.js';
@@ -326,6 +327,24 @@ describe('error classes', () => {
     expect(messages.join('\n')).toContain('\\nINJECTED\\r\\u001b[31m\\u0085NEXT\\u2028LAST.tmp');
     expect(messages.every(msg => !/[\n\r\u001b\u0085\u2028]/u.test(msg))).toBe(true);
     expect(messages.some(msg => msg.includes('remove only that exact path'))).toBe(true);
+  });
+
+  it('escapes terminal controls in cleanup prefixes, targets, and hints', () => {
+    const exactHint = 'Remove exact lock: /tmp/locks/abc.lock\nINJECTED\r\u001b[31mRED';
+    const formatted = formatCleanupFailures(
+      [{
+        target: 'state-lock\nTARGET',
+        error: new ProfileError('release failed', { hint: exactHint }),
+      }],
+      'Cleanup failed\nPREFIX',
+    );
+
+    expect(formatted).toContain('Cleanup failed\\u000aPREFIX');
+    expect(formatted).toContain('Remove exact lock: /tmp/locks/abc.lock\\u000aINJECTED');
+    expect(formatted).toContain('\\u000d\\u001b[31mRED');
+    expect(formatted).not.toContain('\nINJECTED');
+    expect(formatted).not.toContain('\r');
+    expect(formatted).not.toContain('\u001b');
   });
 
   it('should serialize and format only sanitized cleanup summaries', () => {

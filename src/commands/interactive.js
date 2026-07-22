@@ -110,6 +110,10 @@ export function registerInteractive(program) {
             `Browser closed before a final live snapshot; using checkpoint from ${result.persistedAt}`,
           );
         }
+        if (result.persistenceIncomplete) {
+          const persistenceFailure = createLifecyclePersistenceCleanupFailure(result);
+          if (persistenceFailure) log.warn(persistenceFailure.error.format());
+        }
         if (result.cleanupErrors?.length > 0) {
           cleanupIncomplete = true;
           log.warn(formatCleanupFailures(
