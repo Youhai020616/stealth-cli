@@ -55,7 +55,7 @@ function reportLifecycleResult(result, hasPersistenceTarget) {
     const suffix = result.persistedAt
       ? ` (latest durable checkpoint: ${result.persistedAt})`
       : '';
-    log.warn(`Browser closed before a final live snapshot; restored the latest checkpoint${suffix}`);
+    log.warn(`Browser closed before a final live snapshot; retained the latest durable checkpoint${suffix}`);
   } else if (hasPersistenceTarget && result.persistedAt) {
     const profileCount = result.persistence?.profile?.cookies;
     const sessionCount = result.persistence?.session?.cookies;

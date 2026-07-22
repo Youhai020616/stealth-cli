@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D20-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-397%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-407%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -399,7 +399,7 @@ Use `checkpointBrowserState(handle)` for manual mid-run persistence on a handle 
 
 A successful close result or `checkpointBrowserState(handle)` result can contain cookie values and the raw last URL, and error objects retain non-enumerable diagnostic fields such as `.cause` or `.url`. Do not log, serialize, or return browser handles, checkpoint results, or raw close results across trust boundaries. Store `STEALTH_HOME` as sensitive authentication state. Error `toJSON()` output is redacted for routine logging, but the in-memory objects must still be treated as sensitive.
 
-Atomic state writes hold a unique destination-scoped `.claim` from admission through publish or rollback sync. They fail closed when a prior process leaves a strict `.claim`, `.tmp`, or `.rollback` artifact. stealth-cli never auto-removes cross-process artifacts: verify that no live process owns the artifact, inspect it, and remove only the exact owner-only path reported by the command before retrying. This protocol serializes cooperative stealth-cli writers on a coherent local filesystem; owner-only files do not sandbox authentication state from hostile code already running as the same OS user.
+Atomic state writes hold a unique destination-scoped `.claim` from admission through publish or rollback sync. They fail closed when a prior process leaves a strict `.claim`, `.tmp`, or `.rollback` artifact. stealth-cli never auto-removes cross-process artifacts: verify that no live process owns the artifact, inspect it, and remove only the exact owner-only path reported by the command before retrying. On POSIX, sensitive path ancestors must be controlled by the current user or root and must not be non-sticky group/other-writable; user-controlled ancestor symlinks are rejected, while system-owned aliases are accepted only after their canonical target chain passes the same checks. This protocol serializes cooperative stealth-cli writers on a coherent local filesystem; owner-only files do not sandbox authentication state from hostile code already running as the same OS user.
 
 ---
 
@@ -442,8 +442,8 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 ```
 Version:     0.6.1
 Commands:    17
-Tests:       397 passing (29 test files)
-Source:      11,793 lines (49 JavaScript files under `src/`)
+Tests:       407 passing (29 test files)
+Source:      11,898 lines (49 JavaScript files under `src/`)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)

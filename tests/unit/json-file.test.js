@@ -30,6 +30,16 @@ function temporaryFile() {
   return path.join(temporaryDirectory(), 'state.json');
 }
 
+function statsWithUid(stats, uid) {
+  return new Proxy(stats, {
+    get(current, property) {
+      if (property === 'uid') return uid;
+      const value = Reflect.get(current, property);
+      return typeof value === 'function' ? value.bind(current) : value;
+    },
+  });
+}
+
 async function waitForPath(filePath, timeout = 5000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -137,6 +147,69 @@ describe('private state permissions', () => {
 
     expect(() => ensurePrivateDirectory(directoryLink)).toThrow('must not be a symbolic link');
     expect(() => ensurePrivateFile(fileLink)).toThrow('must not be a symbolic link');
+  });
+
+  posixIt('rejects a user-controlled symbolic link in the ancestor chain', () => {
+    const targetDirectory = temporaryDirectory();
+    const linksDirectory = temporaryDirectory();
+    const ancestorLink = path.join(linksDirectory, 'linked-parent');
+    fs.symlinkSync(targetDirectory, ancestorLink);
+
+    expect(() => ensurePrivateDirectory(path.join(ancestorLink, 'state')))
+      .toThrow('unsafe ancestor');
+    expect(fs.existsSync(path.join(targetDirectory, 'state'))).toBe(false);
+  });
+
+  posixIt('rejects an untrusted symlink behind a system-owned alias', () => {
+    const targetDirectory = temporaryDirectory();
+    const linksDirectory = temporaryDirectory();
+    const nestedAlias = path.join(linksDirectory, 'nested-alias');
+    const systemAlias = path.join(linksDirectory, 'system-alias');
+    fs.symlinkSync(targetDirectory, nestedAlias);
+    fs.symlinkSync(nestedAlias, systemAlias);
+    const lstatSync = fs.lstatSync.bind(fs);
+    vi.spyOn(fs, 'lstatSync').mockImplementation((target, ...args) => {
+      const stats = lstatSync(target, ...args);
+      if (target === systemAlias) return statsWithUid(stats, 0);
+      if (target === nestedAlias) return statsWithUid(stats, 12345);
+      return stats;
+    });
+
+    expect(() => ensurePrivateDirectory(path.join(systemAlias, 'state')))
+      .toThrow('symbolic links must be system-owned');
+    expect(fs.existsSync(path.join(targetDirectory, 'state'))).toBe(false);
+  });
+
+  posixIt('accepts a fully trusted system-owned alias chain', () => {
+    const targetDirectory = temporaryDirectory();
+    const linksDirectory = temporaryDirectory();
+    const nestedAlias = path.join(linksDirectory, 'nested-system-alias');
+    const systemAlias = path.join(linksDirectory, 'system-alias');
+    fs.symlinkSync(targetDirectory, nestedAlias);
+    fs.symlinkSync(nestedAlias, systemAlias);
+    const lstatSync = fs.lstatSync.bind(fs);
+    vi.spyOn(fs, 'lstatSync').mockImplementation((target, ...args) => {
+      const stats = lstatSync(target, ...args);
+      if (target === systemAlias || target === nestedAlias) {
+        return statsWithUid(stats, 0);
+      }
+      return stats;
+    });
+
+    ensurePrivateDirectory(path.join(systemAlias, 'state'));
+
+    expect(fs.statSync(path.join(targetDirectory, 'state')).isDirectory()).toBe(true);
+    expect(fs.statSync(path.join(targetDirectory, 'state')).mode & 0o777).toBe(0o700);
+  });
+
+  posixIt('rejects a non-sticky ancestor writable by other users', () => {
+    const directory = temporaryDirectory();
+    const sharedDirectory = path.join(directory, 'shared');
+    fs.mkdirSync(sharedDirectory, { mode: 0o700 });
+    fs.chmodSync(sharedDirectory, 0o777);
+
+    expect(() => ensurePrivateDirectory(path.join(sharedDirectory, 'state')))
+      .toThrow('writable by another user');
   });
 });
 
@@ -441,6 +514,77 @@ describe('writeJsonAtomic', () => {
     fs.unlinkSync(claimPath);
     expect(() => writeJsonAtomic(filePath, { version: 3 })).not.toThrow();
     expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 3 });
+  });
+
+  it('never retries an identity-bound descriptor after same-inode fd reuse', () => {
+    const filePath = temporaryFile();
+    writeJsonAtomic(filePath, { version: 1 });
+    const openSync = fs.openSync.bind(fs);
+    const closeSync = fs.closeSync.bind(fs);
+    const fsyncSync = fs.fsyncSync.bind(fs);
+    let claimDescriptor;
+    let claimPath;
+    let directorySyncs = 0;
+    let ambiguousCloseInjected = false;
+
+    vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
+      const descriptor = openSync(target, ...args);
+      if (typeof target === 'string' && target.endsWith('.claim')) {
+        claimDescriptor = descriptor;
+        claimPath = target;
+      }
+      return descriptor;
+    });
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
+      if (fs.fstatSync(descriptor).isDirectory()) {
+        directorySyncs += 1;
+        if (directorySyncs >= 2) {
+          const error = new Error('directory sync failed');
+          error.code = 'EIO';
+          throw error;
+        }
+      }
+      return fsyncSync(descriptor);
+    });
+    const closeSpy = vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+      if (descriptor === claimDescriptor && !ambiguousCloseInjected) {
+        ambiguousCloseInjected = true;
+        closeSync(descriptor);
+        const error = new Error('claim close failed after releasing descriptor');
+        error.code = 'EIO';
+        throw error;
+      }
+      return closeSync(descriptor);
+    });
+
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 2 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.commitOutcome?.status).toBe('uncertain');
+    expect(failure?.cleanupOutcome?.artifacts).toContainEqual(expect.objectContaining({
+      operation: 'close',
+      path: claimPath,
+    }));
+    expect(closeSpy.mock.calls.filter(([descriptor]) => descriptor === claimDescriptor))
+      .toHaveLength(1);
+    expect(fs.existsSync(claimPath)).toBe(true);
+
+    vi.restoreAllMocks();
+    const reopenedDescriptor = fs.openSync(claimPath, 'r');
+    expect(reopenedDescriptor).toBe(claimDescriptor);
+
+    expect(() => writeJsonAtomic(filePath, { version: 3 }))
+      .toThrow('cleanup is incomplete');
+    expect(fs.fstatSync(reopenedDescriptor).isFile()).toBe(true);
+    fs.closeSync(reopenedDescriptor);
+
+    fs.unlinkSync(claimPath);
+    expect(() => writeJsonAtomic(filePath, { version: 4 })).not.toThrow();
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 4 });
   });
 
   it('fails closed in a new process while a durable temp artifact remains', () => {

@@ -403,7 +403,7 @@ describe('open command', () => {
       checkpointInterval: 1000,
     });
 
-    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('latest checkpoint'));
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('latest durable checkpoint'));
   });
 
   it('reports an exact profile artifact when final persistence uses a checkpoint fallback', async () => {
@@ -437,7 +437,7 @@ describe('open command', () => {
 
     const output = log.warn.mock.calls.flat().join('\n');
     expect(process.exitCode).toBe(8);
-    expect(output).toContain('latest checkpoint');
+    expect(output).toContain('latest durable checkpoint');
     expect(output).toContain(JSON.stringify(artifactPath));
     expect(output).toContain('remove only that exact path');
     expect(output).not.toContain('artifact-content-secret');

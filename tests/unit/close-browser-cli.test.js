@@ -39,6 +39,40 @@ describe('closeBrowserForCli', () => {
     expect(logger.warn).toHaveBeenCalledWith('Browser state was not fully saved: disk full');
   });
 
+  it('falls back to exit code 8 when a persistence error reports success', async () => {
+    closeBrowser.mockResolvedValue({
+      persistence: null,
+      persistenceError: Object.assign(new Error('disk full'), { code: 0 }),
+      cleanupErrors: [],
+    });
+
+    await closeBrowserForCli({ isDaemon: false }, { log: logger });
+
+    expect(process.exitCode).toBe(8);
+  });
+
+  it('redacts URLs and escapes terminal controls from raw persistence errors', async () => {
+    closeBrowser.mockResolvedValue({
+      persistence: null,
+      persistenceError: Object.assign(
+        new Error('failed at https://example.com/callback?token=secret\nINJECTED\r\u001b[31mRED'),
+        { code: 'EIO' },
+      ),
+      cleanupErrors: [],
+    });
+
+    await closeBrowserForCli({ isDaemon: false }, { log: logger });
+
+    const output = logger.warn.mock.calls.flat().join('\n');
+    expect(process.exitCode).toBe(8);
+    expect(output).toContain('failed at https://example.com');
+    expect(output).toContain('\\u000aINJECTED\\u000d\\u001b[31mRED');
+    expect(output).not.toContain('token=secret');
+    expect(output).not.toContain('\nINJECTED');
+    expect(output).not.toContain('\r');
+    expect(output).not.toContain('\u001b');
+  });
+
   it('sets a general failure and reports incomplete cleanup', async () => {
     closeBrowser.mockResolvedValue({
       persistence: null,

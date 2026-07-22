@@ -49,6 +49,12 @@ function wrongOwnerError(targetPath, expectedUserId, actualUserId) {
   return error;
 }
 
+function unsafeAncestorError(targetPath, reason) {
+  const error = new Error(`Sensitive state path has an unsafe ancestor: ${targetPath} (${reason})`);
+  error.code = 'EUNSAFESTATEPATH';
+  return error;
+}
+
 function replacedPathError(targetPath) {
   const error = new Error(`Sensitive state path was replaced while in use: ${targetPath}`);
   error.code = 'ESTATEPATHREPLACED';
@@ -67,6 +73,84 @@ function assertCurrentOwner(stats, targetPath) {
   if (userId !== null && stats.uid !== userId) {
     throw wrongOwnerError(targetPath, userId, stats.uid);
   }
+}
+
+const MAX_ANCESTOR_SYMLINKS = 40;
+
+function splitAbsolutePath(targetPath) {
+  const resolved = path.resolve(targetPath);
+  const root = path.parse(resolved).root;
+  return {
+    root,
+    components: resolved.slice(root.length).split(path.sep).filter(Boolean),
+  };
+}
+
+function assertTrustedDirectoryEntry(stats, current, userId) {
+  if (!stats.isDirectory()) {
+    throw unsafeAncestorError(current, 'ancestor is not a directory');
+  }
+  if (userId !== null && stats.uid !== userId && stats.uid !== 0) {
+    throw unsafeAncestorError(current, `ancestor is controlled by uid ${stats.uid}`);
+  }
+  if ((stats.mode & 0o022) !== 0 && (stats.mode & 0o1000) === 0) {
+    throw unsafeAncestorError(current, 'ancestor is writable by another user');
+  }
+}
+
+function assertTrustedDirectoryPath(directory) {
+  const userId = currentUserId();
+  let { root, components } = splitAbsolutePath(directory);
+  let current = root;
+  let symlinkCount = 0;
+  assertTrustedDirectoryEntry(fs.lstatSync(current), current, userId);
+
+  while (components.length > 0) {
+    const component = components.shift();
+    const candidate = path.join(current, component);
+    const stats = fs.lstatSync(candidate);
+    if (!stats.isSymbolicLink()) {
+      assertTrustedDirectoryEntry(stats, candidate, userId);
+      current = candidate;
+      continue;
+    }
+
+    if (stats.uid !== 0) {
+      throw unsafeAncestorError(candidate, 'symbolic links must be system-owned');
+    }
+    symlinkCount += 1;
+    if (symlinkCount > MAX_ANCESTOR_SYMLINKS) {
+      throw unsafeAncestorError(candidate, 'too many symbolic-link hops');
+    }
+
+    const linkTarget = fs.readlinkSync(candidate, 'utf8');
+    const expandedTarget = path.isAbsolute(linkTarget)
+      ? path.resolve(linkTarget)
+      : path.resolve(path.dirname(candidate), linkTarget);
+    const expandedPath = path.join(expandedTarget, ...components);
+    ({ root, components } = splitAbsolutePath(expandedPath));
+    current = root;
+    assertTrustedDirectoryEntry(fs.lstatSync(current), current, userId);
+  }
+}
+
+/**
+ * Bind path-based operations to an ancestor chain that another OS user cannot
+ * redirect. Every symlink hop is inspected with lstat/readlink; system-owned
+ * aliases are accepted only when every expanded target component is trusted.
+ * Hostile code running as this same uid remains outside the storage boundary.
+ */
+function assertSafeDirectoryAncestors(targetPath) {
+  if (process.platform === 'win32') return;
+
+  let existing = path.dirname(path.resolve(targetPath));
+  while (!fs.lstatSync(existing, { throwIfNoEntry: false })) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+
+  assertTrustedDirectoryPath(existing);
 }
 
 function enforcePrivateMode(targetPath, mode) {
@@ -92,6 +176,7 @@ function enforcePrivateMode(targetPath, mode) {
 }
 
 export function ensurePrivateDirectory(directory) {
+  assertSafeDirectoryAncestors(directory);
   let stats = fs.lstatSync(directory, { throwIfNoEntry: false });
   if (!stats) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -105,9 +190,11 @@ export function ensurePrivateDirectory(directory) {
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw unsafePathError(directory, 'a directory');
   }
+  assertSafeDirectoryAncestors(directory);
 }
 
 export function ensurePrivateFile(filePath, mode = 0o600, expectedIdentity = null) {
+  assertSafeDirectoryAncestors(filePath);
   let stats = fs.lstatSync(filePath);
   if (!stats.isFile() || stats.isSymbolicLink()) {
     throw unsafePathError(filePath, 'a regular file');
@@ -176,6 +263,7 @@ function validateOpenedPrivateFile(descriptor, filePath, mode) {
  */
 export function readPrivateFile(filePath, opts = {}) {
   const { encoding = null, mode = 0o600 } = opts;
+  assertSafeDirectoryAncestors(filePath);
   let descriptor;
   let contents;
   let failure;
@@ -268,28 +356,6 @@ function cleanupFailure(operation, artifactPath, cause) {
   return error;
 }
 
-function bindJsonDescriptorIdentity(resource) {
-  try {
-    const descriptorStats = fs.fstatSync(resource.descriptor);
-    const pathStats = fs.lstatSync(resource.artifactPath, { throwIfNoEntry: false });
-    if (
-      !descriptorStats.isFile()
-      || !pathStats
-      || !pathStats.isFile()
-      || pathStats.isSymbolicLink()
-      || !hasFileIdentity(pathStats, fileIdentity(descriptorStats))
-    ) {
-      return false;
-    }
-    assertCurrentOwner(descriptorStats, resource.artifactPath);
-    assertCurrentOwner(pathStats, resource.artifactPath);
-    resource.identity = fileIdentity(descriptorStats);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function closeJsonDescriptorResource(resource) {
   if (resource.descriptorOpen === false) return;
 
@@ -313,18 +379,20 @@ function closeJsonDescriptorResource(resource) {
     }
   }
 
+  const descriptor = resource.descriptor;
   try {
-    fs.closeSync(resource.descriptor);
+    fs.closeSync(descriptor);
     resource.descriptorOpen = false;
+    resource.descriptor = undefined;
   } catch (error) {
-    if (error.code === 'EBADF') {
-      resource.descriptorOpen = false;
-      return;
-    }
-    if (!resource.identity && !bindJsonDescriptorIdentity(resource)) {
-      resource.descriptorOpen = false;
-      resource.retryable = false;
-    }
+    resource.descriptorOpen = false;
+    resource.descriptor = undefined;
+    if (error.code === 'EBADF') return;
+
+    // close(2) may release the descriptor even while reporting an error. A
+    // later open can reuse both this number and this persistent artifact inode,
+    // so no identity check can authorize retrying the numeric descriptor.
+    resource.retryable = false;
     throw error;
   }
 }

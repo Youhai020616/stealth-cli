@@ -3,9 +3,10 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   createBrowserLifecycle,
   createLaunchSignalGuard,
+  createLifecyclePersistenceCleanupFailure,
 } from '../../src/browser-lifecycle.js';
 import { captureBrowserState, trackLastKnownUrl } from '../../src/browser.js';
-import { ProfileError } from '../../src/errors.js';
+import { ProfileError, attachJsonCleanupDetails } from '../../src/errors.js';
 
 class MockPage extends EventEmitter {
   constructor(url = 'about:blank') {
@@ -141,6 +142,28 @@ describe('launch signal guard', () => {
     expect(lifecycle.start).toHaveBeenCalledOnce();
     expect(lifecycle.requestExit).toHaveBeenCalledWith('signal', { signal: 'SIGTERM' });
     expect(signalEmitter.listenerCount('SIGTERM')).toBe(0);
+  });
+
+  it('should preserve a launch-time signal when startup sees a disconnected browser', async () => {
+    const harness = createHarness();
+    const guard = createLaunchSignalGuard({ signalEmitter: harness.signalEmitter });
+    harness.browser.connected = false;
+
+    harness.signalEmitter.emit('SIGTERM');
+    let failure;
+    try {
+      await guard.transferTo(harness.lifecycle);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure.lifecycleResult).toMatchObject({
+      reason: 'signal',
+      signal: 'SIGTERM',
+      exitCode: 143,
+    });
+    await expect(harness.lifecycle.wait()).rejects.toBe(failure);
+    expect(harness.close).toHaveBeenCalledOnce();
   });
 
   it('should treat a second launch-time signal as force-exit intent', () => {
@@ -339,6 +362,65 @@ describe('browser lifecycle', () => {
     expect(result.persistence.profile.cookies).toBe(1);
   });
 
+  it('should report a failed cached retry after disconnect despite an older checkpoint', async () => {
+    const artifactPath = '/tmp/.work.json.12345678-1234-4234-8234-123456789abc.claim';
+    const firstWriteError = new Error('newer checkpoint write failed');
+    const retryError = attachJsonCleanupDetails(
+      new Error('cached retry failed'),
+      {
+        status: 'pending',
+        destination: '/tmp/work.json',
+        artifacts: [{ operation: 'inspect', path: artifactPath, code: 'EJSONARTIFACTPENDING' }],
+      },
+    );
+    const writeSnapshot = vi.fn()
+      .mockResolvedValueOnce({
+        results: { profile: { name: 'work', cookies: 1 }, session: null },
+      })
+      .mockRejectedValueOnce(firstWriteError)
+      .mockRejectedValueOnce(retryError);
+    const harness = createHarness({ writeSnapshot });
+    harness.lifecycle.start();
+    await new Promise((resolve) => setImmediate(resolve));
+    await expect(harness.lifecycle.checkpoint()).rejects.toBe(firstWriteError);
+
+    harness.browser.disconnect();
+    const result = await harness.lifecycle.wait();
+    const persistenceFailure = createLifecyclePersistenceCleanupFailure(result);
+
+    expect(writeSnapshot).toHaveBeenCalledTimes(3);
+    expect(result.usedCheckpointFallback).toBe(true);
+    expect(result.persistenceIncomplete).toBe(true);
+    expect(result.finalPersistenceError).toBe(retryError);
+    expect(result.exitCode).toBe(8);
+    expect(persistenceFailure.error.cause).toBe(retryError);
+    expect(persistenceFailure.error.format()).toContain(artifactPath);
+  });
+
+  it('should prefer the last retry error when a fresh final write fails twice', async () => {
+    const firstWriteError = new Error('fresh final write failed');
+    const retryError = new Error('fresh final retry failed');
+    const writeSnapshot = vi.fn()
+      .mockResolvedValueOnce({
+        results: { profile: { name: 'work', cookies: 1 }, session: null },
+      })
+      .mockRejectedValueOnce(firstWriteError)
+      .mockRejectedValueOnce(retryError);
+    const harness = createHarness({ writeSnapshot });
+    harness.lifecycle.start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    harness.page.closePage();
+    const result = await harness.lifecycle.wait();
+    const persistenceFailure = createLifecyclePersistenceCleanupFailure(result);
+
+    expect(result.persistenceIncomplete).toBe(true);
+    expect(result.finalCaptureError).toBe(firstWriteError);
+    expect(result.finalPersistenceError).toBe(retryError);
+    expect(result.exitCode).toBe(8);
+    expect(persistenceFailure.error.cause).toBe(retryError);
+  });
+
   it('should treat a successful cached retry as a fresh final save', async () => {
     const writeSnapshot = vi.fn()
       .mockResolvedValueOnce({
@@ -454,7 +536,7 @@ describe('browser lifecycle', () => {
     expect(failure.cleanupFailures[0].error).toBe(cleanupError);
     expect(failure.lifecycleResult).toMatchObject({
       reason: 'context-closed',
-      exitCode: 1,
+      exitCode: 8,
       cleanupErrors: cleanupFailures,
     });
     expect(failure.lifecycleResult.cleanupErrors[0].error).toBe(cleanupError);

@@ -1,5 +1,9 @@
 import { closeBrowser } from '../browser.js';
-import { formatCleanupFailures } from '../errors.js';
+import {
+  StealthError,
+  formatCleanupFailures,
+  safeTextForTerminal,
+} from '../errors.js';
 import { log } from '../output.js';
 
 function setFailureExitCode(code) {
@@ -15,11 +19,16 @@ export async function closeBrowserForCli(handle, opts = {}) {
   const result = await closeBrowser(handle);
 
   if (result.persistenceError) {
-    const details = typeof result.persistenceError.format === 'function'
+    const details = result.persistenceError instanceof StealthError
       ? result.persistenceError.format()
-      : result.persistenceError.message;
+      : safeTextForTerminal(
+        result.persistenceError.message || String(result.persistenceError),
+      );
     logger.warn(`Browser state was not fully saved: ${details}`);
-    setFailureExitCode(result.persistenceError.code || 8);
+    const errorCode = result.persistenceError.code;
+    setFailureExitCode(Number.isInteger(errorCode) && errorCode >= 1 && errorCode <= 255
+      ? errorCode
+      : 8);
   }
   if (result.cleanupErrors.length > 0) {
     logger.warn(formatCleanupFailures(

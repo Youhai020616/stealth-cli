@@ -159,7 +159,7 @@ function escapeTerminalControls(value) {
   ));
 }
 
-function safeTextForTerminal(value) {
+export function safeTextForTerminal(value) {
   return escapeTerminalControls(redactUrls(value));
 }
 

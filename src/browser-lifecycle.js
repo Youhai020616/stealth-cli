@@ -36,6 +36,7 @@ export function createLifecyclePersistenceCleanupFailure(result) {
       result.persistenceIncomplete
       || result.exitCode === 8
       || result.finalCaptureError
+      || result.finalPersistenceError
     )
   ) {
     return null;
@@ -45,7 +46,10 @@ export function createLifecyclePersistenceCleanupFailure(result) {
     ? result.cleanupErrors
     : [];
   const error = new PersistenceError('Browser state finalization was incomplete', {
-    cause: result.finalCaptureError || result.cleanup?.persistenceError || null,
+    cause: result.finalPersistenceError
+      || result.finalCaptureError
+      || result.cleanup?.persistenceError
+      || null,
     cleanupFailures,
     results: result.persistence || null,
     snapshotMetadata: {
@@ -114,10 +118,17 @@ export function createLaunchSignalGuard(opts = {}) {
   return {
     dispose,
     transferTo(lifecycle) {
+      const initialSignal = pendingSignal;
+      const transfer = lifecycle.start(initialSignal
+        ? { reason: 'signal', details: { signal: initialSignal } }
+        : null);
+      const transferredSignal = pendingSignal;
       dispose();
-      lifecycle.start();
-      if (pendingSignal) {
-        return lifecycle.requestExit('signal', { signal: pendingSignal });
+      if (initialSignal) {
+        return transfer || lifecycle.requestExit('signal', { signal: initialSignal });
+      }
+      if (transferredSignal) {
+        return lifecycle.requestExit('signal', { signal: transferredSignal });
       }
       return null;
     },
@@ -348,7 +359,7 @@ export function createBrowserLifecycle(handle, opts = {}) {
   };
 
   const persistCachedSnapshot = async () => {
-    if (!latestCaptured || latestPersisted?.snapshot === latestCaptured) return;
+    if (!latestCaptured || latestPersisted?.snapshot === latestCaptured) return null;
 
     try {
       const result = await writeSnapshot(handle, latestCaptured);
@@ -358,8 +369,10 @@ export function createBrowserLifecycle(handle, opts = {}) {
         persistedAt: new Date().toISOString(),
       };
       lastCheckpointError = null;
+      return null;
     } catch (error) {
       safeNotifyCheckpointError(error);
+      return error;
     }
   };
 
@@ -374,6 +387,7 @@ export function createBrowserLifecycle(handle, opts = {}) {
     await drainCheckpoints();
 
     let finalCaptureError = null;
+    let finalPersistenceError = null;
     let finalSnapshot = null;
     const canCaptureFresh = [
       'last-page-closed',
@@ -394,22 +408,30 @@ export function createBrowserLifecycle(handle, opts = {}) {
     }
 
     if (hasPersistenceTarget) {
-      await persistCachedSnapshot();
+      finalPersistenceError = await persistCachedSnapshot();
     }
 
     const finalSnapshotPersisted = Boolean(
       finalSnapshot && latestPersisted?.snapshot === finalSnapshot,
     );
+    const latestCapturedPersisted = Boolean(
+      !latestCaptured || latestPersisted?.snapshot === latestCaptured,
+    );
     if (finalSnapshotPersisted) finalCaptureError = null;
     const persistenceIncomplete = Boolean(
-      hasPersistenceTarget && canCaptureFresh && !finalSnapshotPersisted,
+      hasPersistenceTarget && (
+        !latestPersisted
+        || !latestCapturedPersisted
+        || (canCaptureFresh && !finalSnapshotPersisted)
+      ),
     );
 
     let fatalPersistenceError = null;
     if (hasPersistenceTarget && !latestPersisted) {
-      fatalPersistenceError = finalCaptureError || lastCheckpointError?.error || new PersistenceError(
-        'Browser closed before authentication state could be saved',
-      );
+      fatalPersistenceError = finalPersistenceError
+        || finalCaptureError
+        || lastCheckpointError?.error
+        || new PersistenceError('Browser closed before authentication state could be saved');
     }
 
     const cleanup = await close(handle, { persist: false });
@@ -428,6 +450,7 @@ export function createBrowserLifecycle(handle, opts = {}) {
       ),
       persistenceIncomplete,
       finalCaptureError,
+      finalPersistenceError,
       cleanup,
       cleanupErrors,
     };
@@ -474,8 +497,8 @@ export function createBrowserLifecycle(handle, opts = {}) {
     return finalization;
   };
 
-  const start = () => {
-    if (phase !== 'idle') return;
+  const start = (initialExit = null) => {
+    if (phase !== 'idle') return null;
     phase = 'running';
 
     context.on('page', onPage);
@@ -487,6 +510,10 @@ export function createBrowserLifecycle(handle, opts = {}) {
       const listener = () => void requestExit('signal', { signal });
       signalEmitter.once(signal, listener);
       signalListeners.set(signal, listener);
+    }
+
+    if (initialExit) {
+      return requestExit(initialExit.reason, initialExit.details);
     }
 
     if (hasPersistenceTarget) {
@@ -502,6 +529,7 @@ export function createBrowserLifecycle(handle, opts = {}) {
     } else if (getOpenPages().length === 0) {
       void requestExit('last-page-closed');
     }
+    return null;
   };
 
   return {
