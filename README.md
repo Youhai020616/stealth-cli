@@ -443,7 +443,7 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 Version:     0.6.1
 Commands:    17
 Tests:       432 passing (29 test files)
-Source:      12,225 lines (49 JavaScript files under `src/`)
+Source:      12,226 lines (49 JavaScript files under `src/`)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)

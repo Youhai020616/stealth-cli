@@ -78,7 +78,7 @@ describe('config command credential display', () => {
     expect(rendered).not.toContain('do-not-leak');
   });
 
-  it('wraps storage failures without exposing raw errors or stack traces', async () => {
+  it('wraps unclassified failures without exposing raw errors or stack traces', async () => {
     configMocks.listConfig.mockImplementation(() => {
       throw new Error('storage failed password=do-not-leak');
     });
@@ -93,7 +93,7 @@ describe('config command credential display', () => {
     expect(rendered).not.toContain('do-not-leak');
   });
 
-  it('reports safe filesystem diagnostics without exposing the raw cause', async () => {
+  it('classifies filesystem failures as persistence errors without exposing the raw cause', async () => {
     const storageError = new Error('write failed password=do-not-leak');
     storageError.code = 'ENOSPC';
     storageError.syscall = 'write';
@@ -105,7 +105,7 @@ describe('config command credential display', () => {
 
     await programForConfig().parseAsync(['node', 'stealth', 'config', 'reset']);
 
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(8);
     const rendered = errorLog.mock.calls.flat().join(' ');
     expect(rendered).toContain('Failed to reset global configuration (ENOSPC during write)');
     expect(rendered).not.toContain('do-not-leak');

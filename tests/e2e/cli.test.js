@@ -128,7 +128,7 @@ describe('CLI integration', () => {
       'us-desktop',
     ], { env: { STEALTH_HOME: profileHome } });
 
-    expect(configResult.exitCode).toBe(1);
+    expect(configResult.exitCode).toBe(8);
     expect(configResult.stderr).toContain(configArtifact);
     expect(profileResult.exitCode).toBe(8);
     expect(profileResult.stderr).toContain(profileArtifact);

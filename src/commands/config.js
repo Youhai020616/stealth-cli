@@ -7,7 +7,7 @@ import {
   getConfigValue, setConfigValue, deleteConfigValue,
   listConfig, resetConfig, CONFIG_FILE,
 } from '../config.js';
-import { StealthError, handleError } from '../errors.js';
+import { PersistenceError, StealthError, handleError } from '../errors.js';
 import { log } from '../output.js';
 import { maskProxyUrl } from '../utils/proxy.js';
 
@@ -28,16 +28,17 @@ function storageDiagnostic(error) {
 }
 
 function reportConfigError(error, operation) {
+  const diagnostic = storageDiagnostic(error);
+  const message = `Failed to ${operation} global configuration${diagnostic}`;
+  const opts = {
+    hint: `Check ownership, permissions, and contents for: ${CONFIG_FILE}`,
+    cause: error,
+  };
   const configError = error instanceof StealthError
     ? error
-    : new StealthError(
-      `Failed to ${operation} global configuration${storageDiagnostic(error)}`,
-      {
-        code: 1,
-        hint: `Check ownership, permissions, and contents for: ${CONFIG_FILE}`,
-        cause: error,
-      },
-    );
+    : diagnostic
+      ? new PersistenceError(message, opts)
+      : new StealthError(message, opts);
   process.exitCode = handleError(configError, { log, exit: false });
 }
 
