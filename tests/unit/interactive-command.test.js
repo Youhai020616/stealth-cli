@@ -81,9 +81,17 @@ vi.mock('../../src/output.js', () => ({
 }));
 
 import { launchBrowser, navigate } from '../../src/browser.js';
-import { createBrowserLifecycle } from '../../src/browser-lifecycle.js';
+import {
+  createBrowserLifecycle,
+  createLaunchSignalGuard,
+} from '../../src/browser-lifecycle.js';
 import { registerInteractive } from '../../src/commands/interactive.js';
-import { NavigationError, ProfileError } from '../../src/errors.js';
+import {
+  BrowserLaunchError,
+  NavigationError,
+  ProfileError,
+  attachCleanupFailures,
+} from '../../src/errors.js';
 import { log } from '../../src/output.js';
 
 describe('interactive command', () => {
@@ -230,6 +238,44 @@ describe('interactive command', () => {
     expect(output).not.toContain('primary-secret');
     expect(output).not.toContain('cleanup-secret');
     expect(output).not.toContain('callback');
+  });
+
+  it('reports inherited launch cleanup failures when a pending signal replaces the error', async () => {
+    const exactHint = 'After confirming no stealth process is using this state, remove this exact lock file: /tmp/locks/abc.lock';
+    const cleanupError = new ProfileError('state lock release failed', {
+      hint: exactHint,
+      cause: new Error('https://example.com/callback?token=cleanup-secret'),
+    });
+    const launchError = attachCleanupFailures(
+      new BrowserLaunchError('browser launch failed', {
+        cause: new Error('https://example.com/callback?token=launch-secret'),
+      }),
+      [{ target: 'state-lock', error: cleanupError }],
+    );
+    createLaunchSignalGuard.mockReturnValueOnce({
+      transferTo: vi.fn(),
+      dispose: vi.fn(),
+      pendingSignal: 'SIGTERM',
+      exitCode: 143,
+    });
+    launchBrowser.mockRejectedValueOnce(launchError);
+    const program = new Command();
+    program.exitOverride();
+    registerInteractive(program);
+
+    await program.parseAsync(['interactive'], { from: 'user' });
+
+    expect(process.exitCode).toBe(143);
+    expect(log.error).toHaveBeenCalledWith('Interrupted by SIGTERM');
+    const output = log.dim.mock.calls.flat().join('\n');
+    expect(output).toContain('Cleanup incomplete: state-lock');
+    expect(output).toContain(exactHint);
+    expect(output).not.toContain('launch-secret');
+    expect(output).not.toContain('cleanup-secret');
+    expect(output).not.toContain('callback');
+    expect(launchError.cleanupFailures).toEqual([
+      { target: 'state-lock', error: cleanupError },
+    ]);
   });
 
   it('should preserve a signal result when cookie loading fails during finalization', async () => {

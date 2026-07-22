@@ -2,29 +2,28 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { ProfileError } from '../errors.js';
-import { ensurePrivateDirectory, ensurePrivateFile } from './json-file.js';
-import {
-  assertStateName,
-  getStateLocksDir,
-  getStealthHome,
-} from './storage-paths.js';
+import { attachCleanupFailures, ProfileError } from '../errors.js';
+import { ensurePrivateDirectory } from './json-file.js';
+import { assertStateName, getStealthHome } from './storage-paths.js';
 
 const STATE_KINDS = new Set(['profile', 'session']);
-const LINK_PUBLICATION_FALLBACK_CODES = new Set([
-  'ENOTSUP',
-  'EOPNOTSUPP',
-  'EPERM',
-  'EXDEV',
-]);
+const OWNER_FILE_PATTERN = /^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.owner\.json$/;
 const STATE_LEASE_RECORDS = new WeakMap();
 
-function targetFor(kind, name) {
+function currentUserId() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function targetFor(kind, name, root = getStealthHome()) {
   if (!STATE_KINDS.has(kind)) {
     throw new ProfileError(`Unknown browser state kind "${kind}"`);
   }
   const label = kind === 'profile' ? 'Profile' : 'Session';
-  return { kind, name: assertStateName(name, label) };
+  return Object.freeze({
+    root: path.resolve(root),
+    kind,
+    name: assertStateName(name, label),
+  });
 }
 
 function processStatus(pid) {
@@ -39,18 +38,82 @@ function processStatus(pid) {
   }
 }
 
+function locksDirectory(root) {
+  return path.join(root, 'locks');
+}
+
 function lockPath(target) {
   const key = `${target.kind}:${target.name}`;
   const digest = crypto.createHash('sha256').update(key).digest('hex');
-  return path.join(getStateLocksDir(), `${digest}.lock`);
+  return path.join(locksDirectory(target.root), `${digest}.lock`);
 }
 
-function staleLockHint(filePath) {
-  return `After confirming no stealth process is using this state, remove this exact lock file: ${filePath}`;
+function ownerFileName(token) {
+  return `${token}.owner.json`;
 }
 
-function readLock(filePath) {
-  const contents = fs.readFileSync(filePath, 'utf8');
+function staleLockHint(directoryPath) {
+  return `After confirming no stealth process is using this state, remove this exact lock directory: ${directoryPath}`;
+}
+
+function unsafePathError(targetPath, expectedType) {
+  const error = new Error(
+    `State lock path must be ${expectedType} and must not be a symbolic link: ${targetPath}`,
+  );
+  error.code = 'EUNSAFESTATEPATH';
+  return error;
+}
+
+function insecurePermissionsError(targetPath, expectedMode, actualMode) {
+  const error = new Error(
+    `State lock path must have mode ${expectedMode.toString(8)}: ${targetPath} (${actualMode.toString(8)})`,
+  );
+  error.code = 'EINSECUREPERMISSIONS';
+  return error;
+}
+
+function wrongOwnerError(targetPath, expectedUserId, actualUserId) {
+  const error = new Error(
+    `State lock path must be owned by uid ${expectedUserId}: ${targetPath} (uid ${actualUserId})`,
+  );
+  error.code = 'EINVALIDSTATELOCKOWNER';
+  return error;
+}
+
+function invalidGenerationError(message) {
+  const error = new Error(message);
+  error.code = 'EINVALIDSTATELOCK';
+  return error;
+}
+
+function assertPrivateNode(stats, targetPath, type, mode) {
+  const validType = type === 'directory' ? stats.isDirectory() : stats.isFile();
+  if (!validType || stats.isSymbolicLink()) {
+    throw unsafePathError(targetPath, type === 'directory' ? 'a directory' : 'a regular file');
+  }
+
+  if (process.platform !== 'win32') {
+    const actualMode = stats.mode & 0o777;
+    if (actualMode !== mode) {
+      throw insecurePermissionsError(targetPath, mode, actualMode);
+    }
+
+    const userId = currentUserId();
+    if (userId !== null && stats.uid !== userId) {
+      throw wrongOwnerError(targetPath, userId, stats.uid);
+    }
+  }
+}
+
+function nodeIdentity(stats) {
+  return Object.freeze({ device: stats.dev, inode: stats.ino });
+}
+
+function hasNodeIdentity(stats, identity) {
+  return stats.dev === identity.device && stats.ino === identity.inode;
+}
+
+function readMetadata(contents) {
   try {
     return JSON.parse(contents);
   } catch {
@@ -58,15 +121,46 @@ function readLock(filePath) {
   }
 }
 
-function validLockMetadata(metadata, target) {
+function readOwnerFile(ownerPath) {
+  let descriptor;
+  let failure;
+  let result;
+
+  try {
+    const noFollow = fs.constants.O_NOFOLLOW || 0;
+    descriptor = fs.openSync(ownerPath, fs.constants.O_RDONLY | noFollow);
+    const stats = fs.fstatSync(descriptor);
+    assertPrivateNode(stats, ownerPath, 'file', 0o600);
+    result = {
+      identity: nodeIdentity(stats),
+      metadata: readMetadata(fs.readFileSync(descriptor, 'utf8')),
+    };
+  } catch (error) {
+    failure = error;
+  }
+
+  if (descriptor !== undefined) {
+    try {
+      fs.closeSync(descriptor);
+    } catch (error) {
+      if (!failure) failure = error;
+    }
+  }
+
+  if (failure) throw failure;
+  return result;
+}
+
+function validLockMetadata(metadata, target, token) {
   return Boolean(
     metadata
     && typeof metadata === 'object'
     && !Array.isArray(metadata)
-    && typeof metadata.token === 'string'
-    && metadata.token.length > 0
+    && metadata.token === token
+    && metadata.root === target.root
     && metadata.kind === target.kind
     && metadata.name === target.name
+    && metadata.uid === currentUserId()
     && Number.isInteger(metadata.pid)
     && metadata.pid > 0
     && typeof metadata.hostname === 'string'
@@ -76,328 +170,489 @@ function validLockMetadata(metadata, target) {
   );
 }
 
-function fileIdentity(stats) {
-  return { device: stats.dev, inode: stats.ino };
+function cleanupEntry(target, error) {
+  return { target: `${target.kind}:${target.name}`, error };
 }
 
-function hasFileIdentity(stats, identity) {
-  return stats.dev === identity.device && stats.ino === identity.inode;
-}
-
-function appendCleanupFailure(error, target, cleanupError) {
-  const existing = Array.isArray(error.cleanupFailures) ? error.cleanupFailures : [];
-  error.cleanupFailures = [
-    ...existing,
-    { target: `${target.kind}:${target.name}`, error: cleanupError },
-  ];
-}
-
-function cleanupOwnedPublishedLock(target, filePath, identity) {
-  let current;
+function attachStateCleanupFailures(error, failures) {
   try {
-    current = fs.lstatSync(filePath, { throwIfNoEntry: false });
-  } catch (cause) {
-    throw new ProfileError(
-      `${target.kind} "${target.name}" partial lock cleanup could not be verified`,
-      { hint: staleLockHint(filePath), cause },
-    );
-  }
-
-  if (!current) return;
-  if (
-    !current.isFile()
-    || current.isSymbolicLink()
-    || !hasFileIdentity(current, identity)
-  ) {
-    throw new ProfileError(
-      `${target.kind} "${target.name}" partial lock is no longer owned by this process`,
-      { hint: staleLockHint(filePath) },
-    );
-  }
-
-  try {
-    fs.unlinkSync(filePath);
-  } catch (cause) {
-    if (cause.code === 'ENOENT') return;
-    throw new ProfileError(
-      `Failed to clean up partial ${target.kind} "${target.name}" lock`,
-      { hint: staleLockHint(filePath), cause },
-    );
+    attachCleanupFailures(error, failures);
+  } catch {
+    // Cleanup diagnostics must never replace a primitive or non-extensible primary error.
   }
 }
 
-function ensureLocksDir() {
-  const root = getStealthHome();
-  const locksDir = getStateLocksDir();
+function ensureLocksDir(root) {
+  const directory = locksDirectory(root);
   try {
-    // Validate the configured root before creating or opening a child path.
     ensurePrivateDirectory(root);
-    ensurePrivateDirectory(locksDir);
+    assertPrivateNode(fs.lstatSync(root), root, 'directory', 0o700);
+    ensurePrivateDirectory(directory);
+    assertPrivateNode(fs.lstatSync(directory), directory, 'directory', 0o700);
   } catch (cause) {
     throw new ProfileError('Browser state lock storage is not private', {
-      hint: `Fix permissions and path types for: ${root}`,
+      hint: `Fix permissions, ownership, and path types for: ${root}`,
       cause,
     });
   }
-  return locksDir;
+  return directory;
 }
 
-function inspectExistingLock(target, filePath) {
+function currentDirectoryStats(directoryPath) {
+  return fs.lstatSync(directoryPath, { throwIfNoEntry: false });
+}
+
+function directoryStillMatches(directoryPath, identity) {
+  const stats = currentDirectoryStats(directoryPath);
+  if (!stats || !hasNodeIdentity(stats, identity)) return null;
+  assertPrivateNode(stats, directoryPath, 'directory', 0o700);
+  return stats;
+}
+
+function ownerPathStillMatches(ownerPath, identity) {
+  const stats = fs.lstatSync(ownerPath, { throwIfNoEntry: false });
+  if (!stats || !hasNodeIdentity(stats, identity)) return null;
+  assertPrivateNode(stats, ownerPath, 'file', 0o600);
+  return stats;
+}
+
+function inspectOwnedGeneration({
+  target,
+  directoryPath,
+  directoryIdentity,
+  ownerPath,
+  ownerIdentity,
+  token,
+}) {
+  const directoryStats = currentDirectoryStats(directoryPath);
+  if (!directoryStats) return 'absent';
+  if (!hasNodeIdentity(directoryStats, directoryIdentity)) return 'replaced';
+  assertPrivateNode(directoryStats, directoryPath, 'directory', 0o700);
+
+  let owner;
   try {
-    ensurePrivateFile(filePath);
-  } catch (cause) {
-    if (cause.code === 'ENOENT') return 'retry';
-    throw new ProfileError(
-      `${target.kind} "${target.name}" lock path is unsafe`,
-      { hint: staleLockHint(filePath), cause },
-    );
+    owner = readOwnerFile(ownerPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      const current = currentDirectoryStats(directoryPath);
+      if (!current) return 'absent';
+      if (!hasNodeIdentity(current, directoryIdentity)) return 'replaced';
+      return 'owner-missing';
+    }
+    throw error;
   }
 
-  let existing;
+  if (!hasNodeIdentity(
+    { dev: owner.identity.device, ino: owner.identity.inode },
+    ownerIdentity,
+  )) {
+    return 'owner-replaced';
+  }
+  if (!ownerPathStillMatches(ownerPath, ownerIdentity)) return 'owner-replaced';
+
+  const entries = fs.readdirSync(directoryPath);
+  const current = currentDirectoryStats(directoryPath);
+  if (!current) return 'absent';
+  if (!hasNodeIdentity(current, directoryIdentity)) return 'replaced';
+  assertPrivateNode(current, directoryPath, 'directory', 0o700);
+
+  if (entries.length !== 1 || entries[0] !== path.basename(ownerPath)) {
+    throw invalidGenerationError(`State lock directory has unexpected owner entries: ${directoryPath}`);
+  }
+  if (!validLockMetadata(owner.metadata, target, token)) {
+    throw invalidGenerationError(`State lock owner metadata is invalid: ${ownerPath}`);
+  }
+
+  return 'owned';
+}
+
+function invalidStaleLock(target, directoryPath, cause) {
+  return new ProfileError(
+    `${target.kind} "${target.name}" has an invalid stale lock`,
+    { hint: staleLockHint(directoryPath), cause },
+  );
+}
+
+function inspectExistingLock(target, directoryPath) {
+  let directoryStats;
   try {
-    existing = readLock(filePath);
+    directoryStats = currentDirectoryStats(directoryPath);
+  } catch (cause) {
+    throw new ProfileError(
+      `Failed to inspect ${target.kind} "${target.name}" lock`,
+      { hint: staleLockHint(directoryPath), cause },
+    );
+  }
+  if (!directoryStats) return 'retry';
+
+  try {
+    assertPrivateNode(directoryStats, directoryPath, 'directory', 0o700);
+  } catch (cause) {
+    throw new ProfileError(
+      `${target.kind} "${target.name}" lock directory is unsafe`,
+      { hint: staleLockHint(directoryPath), cause },
+    );
+  }
+  const directoryIdentity = nodeIdentity(directoryStats);
+
+  let entries;
+  try {
+    entries = fs.readdirSync(directoryPath);
   } catch (cause) {
     if (cause.code === 'ENOENT') return 'retry';
     throw new ProfileError(
       `Failed to inspect ${target.kind} "${target.name}" lock`,
-      { hint: `Check access permissions for: ${filePath}`, cause },
+      { hint: staleLockHint(directoryPath), cause },
     );
   }
 
-  if (!validLockMetadata(existing, target)) {
+  const current = currentDirectoryStats(directoryPath);
+  if (!current || !hasNodeIdentity(current, directoryIdentity)) return 'retry';
+  if (entries.length !== 1) throw invalidStaleLock(target, directoryPath);
+
+  const match = OWNER_FILE_PATTERN.exec(entries[0]);
+  if (!match) throw invalidStaleLock(target, directoryPath);
+  const token = match[1];
+  const ownerPath = path.join(directoryPath, entries[0]);
+
+  let owner;
+  try {
+    owner = readOwnerFile(ownerPath);
+    if (!ownerPathStillMatches(ownerPath, owner.identity)) return 'retry';
+  } catch (cause) {
+    if (cause.code === 'ENOENT') return 'retry';
     throw new ProfileError(
-      `${target.kind} "${target.name}" has an invalid stale lock`,
-      { hint: staleLockHint(filePath) },
+      `${target.kind} "${target.name}" lock owner metadata is unsafe`,
+      { hint: staleLockHint(directoryPath), cause },
     );
   }
 
-  const status = existing.hostname === os.hostname()
-    ? processStatus(existing.pid)
+  const finalDirectory = currentDirectoryStats(directoryPath);
+  if (!finalDirectory || !hasNodeIdentity(finalDirectory, directoryIdentity)) return 'retry';
+  if (!validLockMetadata(owner.metadata, target, token)) {
+    throw invalidStaleLock(target, directoryPath);
+  }
+
+  const status = owner.metadata.hostname === os.hostname()
+    ? processStatus(owner.metadata.pid)
     : 'remote';
   if (status === 'dead') {
     throw new ProfileError(
-      `${target.kind} "${target.name}" has a stale lock from process ${existing.pid}`,
-      { hint: staleLockHint(filePath) },
+      `${target.kind} "${target.name}" has a stale lock from process ${owner.metadata.pid}`,
+      { hint: staleLockHint(directoryPath) },
     );
   }
 
-  const owner = existing.hostname === os.hostname()
-    ? `process ${existing.pid}`
-    : `process ${existing.pid} on ${existing.hostname}`;
+  const ownerDescription = owner.metadata.hostname === os.hostname()
+    ? `process ${owner.metadata.pid}`
+    : `process ${owner.metadata.pid} on ${owner.metadata.hostname}`;
   throw new ProfileError(
-    `${target.kind} "${target.name}" is already in use by ${owner}`,
+    `${target.kind} "${target.name}" is already in use by ${ownerDescription}`,
     { hint: 'Close the other stealth browser before reusing this state' },
   );
 }
 
-function createRelease(target, filePath, token) {
-  let active = true;
-  let owned = true;
+function rollbackOwnedGeneration(
+  target,
+  directoryPath,
+  directoryIdentity,
+  ownerPath,
+  ownerIdentity,
+) {
+  if (!directoryStillMatches(directoryPath, directoryIdentity)) return;
 
-  function clearOwnership() {
-    active = false;
-    owned = false;
+  if (ownerIdentity) {
+    const ownerStats = fs.lstatSync(ownerPath, { throwIfNoEntry: false });
+    if (!ownerStats) return;
+    if (!hasNodeIdentity(ownerStats, ownerIdentity)) {
+      throw new ProfileError(
+        `${target.kind} "${target.name}" partial lock owner is no longer owned by this process`,
+        { hint: staleLockHint(directoryPath) },
+      );
+    }
+    assertPrivateNode(ownerStats, ownerPath, 'file', 0o600);
+
+    try {
+      fs.unlinkSync(ownerPath);
+    } catch (cause) {
+      if (cause.code === 'ENOENT') return;
+      throw new ProfileError(
+        `Failed to clean up partial ${target.kind} "${target.name}" lock owner`,
+        { hint: staleLockHint(directoryPath), cause },
+      );
+    }
+  }
+
+  if (!directoryStillMatches(directoryPath, directoryIdentity)) return;
+  const entries = fs.readdirSync(directoryPath);
+  if (entries.length !== 0) {
+    throw new ProfileError(
+      `${target.kind} "${target.name}" partial lock directory is not empty`,
+      { hint: staleLockHint(directoryPath) },
+    );
+  }
+  if (!directoryStillMatches(directoryPath, directoryIdentity)) return;
+
+  try {
+    fs.rmdirSync(directoryPath);
+  } catch (cause) {
+    if (cause.code === 'ENOENT') return;
+    throw new ProfileError(
+      `Failed to clean up partial ${target.kind} "${target.name}" lock directory`,
+      { hint: staleLockHint(directoryPath), cause },
+    );
+  }
+}
+
+function createRelease(record) {
+  let authorizationActive = true;
+  let ownerRemoved = false;
+  let cleanupComplete = false;
+
+  function markReplaced() {
+    authorizationActive = false;
+    cleanupComplete = true;
+  }
+
+  function ownershipFailure(cause) {
+    authorizationActive = false;
+    return new ProfileError(
+      `${record.target.kind} "${record.target.name}" lock ownership could not be verified`,
+      { hint: staleLockHint(record.directoryPath), cause },
+    );
+  }
+
+  function cleanupReleasedDirectory() {
+    let directoryStats;
+    try {
+      directoryStats = currentDirectoryStats(record.directoryPath);
+    } catch (cause) {
+      throw new ProfileError(
+        `Failed to release ${record.target.kind} "${record.target.name}" lock directory: ${cause.message}`,
+        { hint: staleLockHint(record.directoryPath), cause },
+      );
+    }
+
+    if (!directoryStats || !hasNodeIdentity(directoryStats, record.directoryIdentity)) {
+      cleanupComplete = true;
+      return;
+    }
+
+    try {
+      assertPrivateNode(directoryStats, record.directoryPath, 'directory', 0o700);
+      const entries = fs.readdirSync(record.directoryPath);
+      if (entries.length !== 0) {
+        throw invalidGenerationError(
+          `Released state lock directory is not empty: ${record.directoryPath}`,
+        );
+      }
+      if (!directoryStillMatches(record.directoryPath, record.directoryIdentity)) {
+        cleanupComplete = true;
+        return;
+      }
+      fs.rmdirSync(record.directoryPath);
+      cleanupComplete = true;
+    } catch (cause) {
+      if (cause.code === 'ENOENT') {
+        cleanupComplete = true;
+        return;
+      }
+      throw new ProfileError(
+        `Failed to release ${record.target.kind} "${record.target.name}" lock directory: ${cause.message}`,
+        { hint: staleLockHint(record.directoryPath), cause },
+      );
+    }
   }
 
   return {
-    isActive: () => active && owned,
+    isActive() {
+      if (!authorizationActive || ownerRemoved || cleanupComplete) return false;
+      try {
+        const status = inspectOwnedGeneration(record);
+        if (status === 'owned') return true;
+        authorizationActive = false;
+        if (status === 'absent' || status === 'replaced') cleanupComplete = true;
+        return false;
+      } catch {
+        authorizationActive = false;
+        return false;
+      }
+    },
+
     release() {
-      if (!active) return;
+      if (cleanupComplete) return;
 
-      try {
-        ensurePrivateFile(filePath);
-      } catch (cause) {
-        if (cause.code === 'ENOENT') {
-          clearOwnership();
+      if (!ownerRemoved) {
+        let status;
+        try {
+          status = inspectOwnedGeneration(record);
+        } catch (cause) {
+          throw ownershipFailure(cause);
+        }
+
+        if (status === 'absent' || status === 'replaced') {
+          markReplaced();
           return;
         }
-        owned = false;
-        throw new ProfileError(
-          `${target.kind} "${target.name}" lock ownership could not be verified`,
-          { hint: staleLockHint(filePath), cause },
-        );
-      }
-
-      let current;
-      try {
-        current = readLock(filePath);
-      } catch (cause) {
-        if (cause.code === 'ENOENT') {
-          clearOwnership();
-          return;
+        if (status !== 'owned') {
+          throw ownershipFailure(
+            invalidGenerationError(`State lock owner is ${status}: ${record.ownerPath}`),
+          );
         }
-        owned = false;
-        throw new ProfileError(
-          `${target.kind} "${target.name}" lock ownership could not be verified`,
-          { hint: staleLockHint(filePath), cause },
-        );
-      }
 
-      if (!current) {
-        owned = false;
-        throw new ProfileError(
-          `${target.kind} "${target.name}" lock ownership could not be verified`,
-          { hint: staleLockHint(filePath) },
-        );
-      }
-      if (current.token !== token) {
-        clearOwnership();
-        return;
-      }
-
-      try {
-        fs.unlinkSync(filePath);
-      } catch (cause) {
-        if (cause.code === 'ENOENT') {
-          clearOwnership();
-          return;
+        try {
+          fs.unlinkSync(record.ownerPath);
+        } catch (cause) {
+          if (cause.code === 'ENOENT') {
+            authorizationActive = false;
+            const current = currentDirectoryStats(record.directoryPath);
+            if (!current || !hasNodeIdentity(current, record.directoryIdentity)) {
+              cleanupComplete = true;
+              return;
+            }
+            throw ownershipFailure(cause);
+          }
+          throw new ProfileError(
+            `Failed to release ${record.target.kind} "${record.target.name}" lock owner: ${cause.message}`,
+            { hint: staleLockHint(record.directoryPath), cause },
+          );
         }
-        throw new ProfileError(
-          `Failed to release ${target.kind} "${target.name}" lock: ${cause.message}`,
-          { cause },
-        );
+
+        authorizationActive = false;
+        ownerRemoved = true;
       }
-      clearOwnership();
+
+      cleanupReleasedDirectory();
     },
   };
 }
 
-function publishLockWithExclusiveOpen(target, filePath, metadata) {
-  let descriptor;
-  let identity;
-
-  try {
-    descriptor = fs.openSync(filePath, 'wx', 0o600);
-    const stats = fs.fstatSync(descriptor);
-    identity = fileIdentity(stats);
-    if (!stats.isFile()) {
-      const error = new Error(`Lock path is not a regular file: ${filePath}`);
-      error.code = 'EUNSAFESTATEPATH';
-      throw error;
-    }
-
-    fs.writeFileSync(descriptor, `${JSON.stringify(metadata)}\n`, 'utf8');
-    fs.fsyncSync(descriptor);
-    const closingDescriptor = descriptor;
-    descriptor = undefined;
-    fs.closeSync(closingDescriptor);
-
-    ensurePrivateFile(filePath);
-    const published = readLock(filePath);
-    if (!validLockMetadata(published, target) || published.token !== metadata.token) {
-      throw new ProfileError(
-        `${target.kind} "${target.name}" lock publication could not be verified`,
-        { hint: staleLockHint(filePath) },
-      );
-    }
-
-    return createRelease(target, filePath, metadata.token);
-  } catch (cause) {
-    // An EEXIST from the exclusive create belongs to another contender. It
-    // must be inspected by the normal conflict path, never cleaned up here.
-    if (cause.code === 'EEXIST' && identity === undefined) throw cause;
-
-    const failure = cause instanceof ProfileError
-      ? cause
-      : new ProfileError(
-        `Failed to acquire ${target.kind} "${target.name}" lock`,
-        { cause },
-      );
-
-    if (descriptor !== undefined) {
-      try {
-        fs.closeSync(descriptor);
-      } catch (cleanupError) {
-        appendCleanupFailure(failure, target, cleanupError);
-      }
-    }
-    if (identity !== undefined) {
-      try {
-        cleanupOwnedPublishedLock(target, filePath, identity);
-      } catch (cleanupError) {
-        appendCleanupFailure(failure, target, cleanupError);
-      }
-    }
-
-    throw failure;
-  }
-}
-
-function acquireLock(target) {
-  const locksDir = ensureLocksDir();
-  const filePath = lockPath(target);
-  const tempPath = path.join(
-    locksDir,
-    `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
-  );
+function publishOwnedGeneration(target, directoryPath) {
   const token = crypto.randomUUID();
+  const ownerPath = path.join(directoryPath, ownerFileName(token));
   const metadata = {
     token,
+    root: target.root,
     kind: target.kind,
     name: target.name,
+    uid: currentUserId(),
     pid: process.pid,
     hostname: os.hostname(),
     createdAt: new Date().toISOString(),
   };
 
+  let directoryIdentity;
+  let ownerIdentity;
   let descriptor;
+
   try {
-    descriptor = fs.openSync(tempPath, 'wx', 0o600);
+    const directoryStats = currentDirectoryStats(directoryPath);
+    if (!directoryStats) {
+      throw invalidGenerationError(`New state lock directory disappeared: ${directoryPath}`);
+    }
+    assertPrivateNode(directoryStats, directoryPath, 'directory', 0o700);
+    directoryIdentity = nodeIdentity(directoryStats);
+
+    descriptor = fs.openSync(ownerPath, 'wx', 0o600);
+    const ownerStats = fs.fstatSync(descriptor);
+    assertPrivateNode(ownerStats, ownerPath, 'file', 0o600);
+    ownerIdentity = nodeIdentity(ownerStats);
+
     fs.writeFileSync(descriptor, `${JSON.stringify(metadata)}\n`, 'utf8');
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
     descriptor = undefined;
-    ensurePrivateFile(tempPath);
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      let publicationError;
-      try {
-        // A hard link publishes a fully written inode and fails if the lock name
-        // already exists, avoiding partially visible lock metadata.
-        fs.linkSync(tempPath, filePath);
-        return createRelease(target, filePath, token);
-      } catch (error) {
-        publicationError = error;
-      }
-
-      if (LINK_PUBLICATION_FALLBACK_CODES.has(publicationError.code)) {
-        try {
-          // Some filesystems cannot publish with hard links. Exclusive creation
-          // makes the final path visible before writing, so contenders fail
-          // closed on incomplete metadata until this owner finishes or cleans up.
-          return publishLockWithExclusiveOpen(target, filePath, metadata);
-        } catch (error) {
-          publicationError = error;
-        }
-      }
-
-      if (publicationError.code !== 'EEXIST') {
-        if (publicationError instanceof ProfileError) throw publicationError;
-        throw new ProfileError(
-          `Failed to acquire ${target.kind} "${target.name}" lock`,
-          { cause: publicationError },
-        );
-      }
-      if (inspectExistingLock(target, filePath) === 'retry') continue;
+    const record = Object.freeze({
+      target,
+      directoryPath,
+      directoryIdentity,
+      ownerPath,
+      ownerIdentity,
+      token,
+    });
+    if (inspectOwnedGeneration(record) !== 'owned') {
+      throw new ProfileError(
+        `${target.kind} "${target.name}" lock publication could not be verified`,
+        { hint: staleLockHint(directoryPath) },
+      );
     }
-  } catch (error) {
-    if (error instanceof ProfileError) throw error;
-    throw new ProfileError(
-      `Failed to acquire ${target.kind} "${target.name}" lock`,
-      { cause: error },
-    );
-  } finally {
+
+    return createRelease(record);
+  } catch (cause) {
+    const failure = cause instanceof ProfileError
+      ? cause
+      : new ProfileError(
+        `Failed to acquire ${target.kind} "${target.name}" lock`,
+        { hint: staleLockHint(directoryPath), cause },
+      );
+    const cleanupFailures = [];
+
     if (descriptor !== undefined) {
       try {
         fs.closeSync(descriptor);
-      } catch {}
+      } catch (cleanupError) {
+        cleanupFailures.push(cleanupEntry(target, cleanupError));
+      }
     }
+    if (directoryIdentity) {
+      try {
+        rollbackOwnedGeneration(
+          target,
+          directoryPath,
+          directoryIdentity,
+          ownerPath,
+          ownerIdentity,
+        );
+      } catch (cleanupError) {
+        cleanupFailures.push(cleanupEntry(target, cleanupError));
+      }
+    }
+
+    attachStateCleanupFailures(failure, cleanupFailures);
+    throw failure;
+  }
+}
+
+function acquireLock(target) {
+  ensureLocksDir(target.root);
+  const directoryPath = lockPath(target);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      fs.unlinkSync(tempPath);
-    } catch {}
+      fs.mkdirSync(directoryPath, { mode: 0o700 });
+      return publishOwnedGeneration(target, directoryPath);
+    } catch (error) {
+      if (error.code !== 'EEXIST') {
+        if (error instanceof ProfileError) throw error;
+        throw new ProfileError(
+          `Failed to acquire ${target.kind} "${target.name}" lock`,
+          { hint: staleLockHint(directoryPath), cause: error },
+        );
+      }
+      if (inspectExistingLock(target, directoryPath) === 'retry') continue;
+    }
   }
 
-  throw new ProfileError(`${target.kind} "${target.name}" could not be locked`);
+  throw new ProfileError(`${target.kind} "${target.name}" could not be locked`, {
+    hint: staleLockHint(directoryPath),
+  });
+}
+
+function leaseOwnsTarget(lease, target) {
+  if (typeof lease !== 'function' && (typeof lease !== 'object' || lease === null)) {
+    return false;
+  }
+
+  const records = STATE_LEASE_RECORDS.get(lease);
+  if (!records) return false;
+
+  return records.some(({ target: held, lock }) => (
+    held.root === target.root
+    && held.kind === target.kind
+    && held.name === target.name
+    && lock.isActive()
+  ));
 }
 
 /**
@@ -410,49 +665,50 @@ function acquireLock(target) {
  *   Callable, idempotent, retryable release function and ownership predicate.
  */
 export function acquireStateLocks(opts = {}) {
+  const root = getStealthHome();
   const targets = [];
   if (opts.profile !== undefined && opts.profile !== null) {
-    targets.push(targetFor('profile', opts.profile));
+    targets.push(targetFor('profile', opts.profile, root));
   }
   if (opts.session !== undefined && opts.session !== null) {
-    targets.push(targetFor('session', opts.session));
+    targets.push(targetFor('session', opts.session, root));
   }
   targets.sort((a, b) => `${a.kind}:${a.name}`.localeCompare(`${b.kind}:${b.name}`));
 
-  const records = [];
+  const acquiredRecords = [];
   try {
     for (const target of targets) {
-      records.push({ target, lock: acquireLock(target) });
+      acquiredRecords.push(Object.freeze({ target, lock: acquireLock(target) }));
     }
   } catch (error) {
+    const cleanupFailures = [];
+    for (let index = acquiredRecords.length - 1; index >= 0; index -= 1) {
+      try {
+        acquiredRecords[index].lock.release();
+      } catch (cleanupError) {
+        cleanupFailures.push(cleanupEntry(acquiredRecords[index].target, cleanupError));
+      }
+    }
+    attachStateCleanupFailures(error, cleanupFailures);
+    throw error;
+  }
+
+  const records = Object.freeze(acquiredRecords.slice());
+  const lease = () => {
+    let firstError;
     const cleanupFailures = [];
     for (let index = records.length - 1; index >= 0; index -= 1) {
       try {
         records[index].lock.release();
-      } catch (cleanupError) {
-        cleanupFailures.push({
-          target: `${records[index].target.kind}:${records[index].target.name}`,
-          error: cleanupError,
-        });
-      }
-    }
-    if (cleanupFailures.length > 0) {
-      const existing = Array.isArray(error.cleanupFailures) ? error.cleanupFailures : [];
-      error.cleanupFailures = [...existing, ...cleanupFailures];
-    }
-    throw error;
-  }
-
-  const lease = () => {
-    const errors = [];
-    for (let index = records.length - 1; index >= 0; index -= 1) {
-      try {
-        records[index].lock.release();
       } catch (error) {
-        errors.push(error);
+        if (!firstError) firstError = error;
+        else cleanupFailures.push(cleanupEntry(records[index].target, error));
       }
     }
-    if (errors.length > 0) throw errors[0];
+    if (firstError) {
+      attachStateCleanupFailures(firstError, cleanupFailures);
+      throw firstError;
+    }
   };
 
   STATE_LEASE_RECORDS.set(lease, records);
@@ -462,7 +718,8 @@ export function acquireStateLocks(opts = {}) {
 }
 
 /**
- * Verify that a value is a genuine module-created lease with active ownership.
+ * Verify that a value is a genuine module-created lease with active ownership
+ * for the currently resolved STEALTH_HOME root.
  *
  * @param {unknown} lease
  * @param {'profile'|'session'} kind
@@ -470,15 +727,7 @@ export function acquireStateLocks(opts = {}) {
  * @returns {boolean}
  */
 export function ownsStateLock(lease, kind, name) {
-  if (
-    (typeof lease !== 'function' && (typeof lease !== 'object' || lease === null))
-    || !STATE_KINDS.has(kind)
-  ) {
-    return false;
-  }
-
-  const records = STATE_LEASE_RECORDS.get(lease);
-  if (!records) return false;
+  if (!STATE_KINDS.has(kind)) return false;
 
   let target;
   try {
@@ -486,10 +735,7 @@ export function ownsStateLock(lease, kind, name) {
   } catch {
     return false;
   }
-
-  return records.some(({ target: held, lock }) => (
-    lock.isActive() && held.kind === target.kind && held.name === target.name
-  ));
+  return leaseOwnsTarget(lease, target);
 }
 
 /**
@@ -509,7 +755,7 @@ export function withStateLock(kind, name, lease, callback) {
     throw new TypeError('State lock callback must be a function');
   }
 
-  if (ownsStateLock(lease, target.kind, target.name)) {
+  if (leaseOwnsTarget(lease, target)) {
     return callback(lease);
   }
 
@@ -521,7 +767,7 @@ export function withStateLock(kind, name, lease, callback) {
     try {
       activeLease();
     } catch (cleanupError) {
-      error.cleanupFailures = [{ target: `${target.kind}:${target.name}`, error: cleanupError }];
+      attachStateCleanupFailures(error, [cleanupEntry(target, cleanupError)]);
     }
     throw error;
   }
@@ -536,7 +782,7 @@ export function withStateLock(kind, name, lease, callback) {
         try {
           activeLease();
         } catch (cleanupError) {
-          error.cleanupFailures = [{ target: `${target.kind}:${target.name}`, error: cleanupError }];
+          attachStateCleanupFailures(error, [cleanupEntry(target, cleanupError)]);
         }
         throw error;
       },

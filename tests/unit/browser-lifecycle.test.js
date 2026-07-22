@@ -4,6 +4,7 @@ import {
   createBrowserLifecycle,
   createLaunchSignalGuard,
 } from '../../src/browser-lifecycle.js';
+import { ProfileError } from '../../src/errors.js';
 
 class MockPage extends EventEmitter {
   constructor(url = 'about:blank') {
@@ -398,11 +399,19 @@ describe('browser lifecycle', () => {
     expect(result.cleanupErrors[0].target).toBe('browser');
   });
 
-  it('should combine persistence and cleanup failures without hiding either', async () => {
-    const captureState = vi.fn().mockRejectedValue(new Error('persistence failed'));
-    const close = vi.fn(async () => ({
-      cleanupErrors: [{ target: 'browser', error: new Error('still connected') }],
-    }));
+  it('should preserve nested cleanup hints while sanitizing combined failure serialization', async () => {
+    const persistenceUrl = 'https://example.com/callback?token=persistence-secret';
+    const cleanupUrl = 'https://example.com/callback?token=cleanup-secret';
+    const exactHint = 'After confirming no stealth process is using this state, remove this exact lock file: /tmp/locks/abc.lock';
+    const captureState = vi.fn().mockRejectedValue(
+      new Error(`persistence failed at ${persistenceUrl}`),
+    );
+    const cleanupError = new ProfileError(`state lock release failed at ${cleanupUrl}`, {
+      hint: exactHint,
+      cause: new Error(`nested cleanup failed at ${cleanupUrl}`),
+    });
+    const cleanupFailures = [{ target: 'state-lock', error: cleanupError }];
+    const close = vi.fn(async () => ({ cleanupErrors: cleanupFailures }));
     const harness = createHarness({ captureState, close });
     harness.lifecycle.start();
     harness.context.closeContext();
@@ -416,7 +425,15 @@ describe('browser lifecycle', () => {
 
     expect(failure.message).toContain('persistence failed');
     expect(failure.message).toContain('cleanup also failed');
-    expect(failure.cleanupFailures).toEqual([{ target: 'browser' }]);
+    expect(failure.cleanupFailures).toEqual(cleanupFailures);
+    expect(failure.cleanupFailures[0].error).toBe(cleanupError);
+    expect(failure.format()).toContain(exactHint);
+    const serialized = JSON.stringify(failure);
+    expect(serialized).toContain(exactHint);
+    expect(serialized).not.toContain('persistence-secret');
+    expect(serialized).not.toContain('cleanup-secret');
+    expect(serialized).not.toContain('callback');
+    expect(serialized).not.toContain('state lock release failed');
   });
 
   it('should coalesce slow checkpoints and run a fresh final checkpoint', async () => {

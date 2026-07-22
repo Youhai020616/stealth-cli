@@ -44,8 +44,16 @@ import {
   navigate,
   waitForReady,
 } from '../../src/browser.js';
-import { createBrowserLifecycle } from '../../src/browser-lifecycle.js';
-import { NavigationError, ProfileError } from '../../src/errors.js';
+import {
+  createBrowserLifecycle,
+  createLaunchSignalGuard,
+} from '../../src/browser-lifecycle.js';
+import {
+  BrowserLaunchError,
+  NavigationError,
+  ProfileError,
+  attachCleanupFailures,
+} from '../../src/errors.js';
 import { log } from '../../src/output.js';
 import {
   parseCheckpointInterval,
@@ -239,6 +247,50 @@ describe('open command', () => {
     expect(primaryError.format()).toContain(exactHint);
     expect(primaryError.format()).not.toContain('primary-secret');
     expect(primaryError.format()).not.toContain('cleanup-secret');
+  });
+
+  it('preserves launch cleanup failures when a pending signal replaces the launch error', async () => {
+    const exactHint = 'After confirming no stealth process is using this state, remove this exact lock file: /tmp/locks/abc.lock';
+    const cleanupError = new ProfileError('state lock release failed', {
+      hint: exactHint,
+      cause: new Error('https://example.com/callback?token=cleanup-secret'),
+    });
+    const launchError = attachCleanupFailures(
+      new BrowserLaunchError('browser launch failed', {
+        cause: new Error('https://example.com/callback?token=launch-secret'),
+      }),
+      [{ target: 'state-lock', error: cleanupError }],
+    );
+    createLaunchSignalGuard.mockReturnValueOnce({
+      transferTo: vi.fn(),
+      dispose: vi.fn(),
+      pendingSignal: 'SIGINT',
+      exitCode: 130,
+    });
+    launchBrowser.mockRejectedValueOnce(launchError);
+
+    let failure;
+    try {
+      await runOpen(undefined, { checkpointInterval: 1000 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'StealthError',
+      message: 'Interrupted by SIGINT',
+      code: 130,
+      cause: launchError,
+      cleanupFailures: [{ target: 'state-lock', error: cleanupError }],
+    });
+    expect(Object.getOwnPropertyDescriptor(failure, 'cause')?.enumerable).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(failure, 'cleanupFailures')?.enumerable).toBe(false);
+    expect(failure.format()).toContain(exactHint);
+    const serialized = JSON.stringify(failure);
+    expect(serialized).toContain(exactHint);
+    expect(serialized).not.toContain('launch-secret');
+    expect(serialized).not.toContain('cleanup-secret');
+    expect(serialized).not.toContain('callback');
   });
 
   it('should warn when a hard disconnect uses a durable checkpoint', async () => {

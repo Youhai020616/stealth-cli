@@ -487,7 +487,10 @@ export function registerInteractive(program) {
         signalGuard.dispose();
         if (rl) rl.close();
 
-        let cleanupFailures = [];
+        const inheritedCleanupFailures = Array.isArray(err.cleanupFailures)
+          ? err.cleanupFailures
+          : [];
+        const cleanupFailures = [...inheritedCleanupFailures];
         if (lifecycle) {
           try {
             const result = await lifecycle.requestExit("command-error");
@@ -495,23 +498,29 @@ export function registerInteractive(program) {
               applyLifecycleResult(result);
               return;
             }
-            cleanupFailures = result.cleanupErrors || [];
+            cleanupFailures.push(...(result.cleanupErrors || []));
           } catch (lifecycleError) {
             if (lifecycleError !== err) {
-              cleanupFailures = lifecycleError.cleanupFailures?.length > 0
-                ? lifecycleError.cleanupFailures
-                : [{ target: "lifecycle", error: lifecycleError }];
+              cleanupFailures.push(...(
+                lifecycleError.cleanupFailures?.length > 0
+                  ? lifecycleError.cleanupFailures
+                  : [{ target: "lifecycle", error: lifecycleError }]
+              ));
             }
           }
         } else if (handle) {
           const cleanup = await closeBrowserForCli(handle, { log });
-          cleanupFailures = cleanup.cleanupErrors || [];
+          cleanupFailures.push(...(cleanup.cleanupErrors || []));
         }
-        attachCleanupFailures(err, cleanupFailures);
+        attachCleanupFailures(
+          err,
+          cleanupFailures.slice(inheritedCleanupFailures.length),
+        );
         const handledError = signalGuard.pendingSignal && !lifecycle
           ? attachCleanupFailures(
             new StealthError(`Interrupted by ${signalGuard.pendingSignal}`, {
               code: signalGuard.exitCode,
+              cause: err,
             }),
             cleanupFailures,
           )

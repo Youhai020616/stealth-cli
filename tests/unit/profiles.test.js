@@ -111,6 +111,107 @@ describe('profiles', () => {
     expect(loaded.fingerprint.locale).toBe('ja-JP');
   });
 
+  it('accepts fully validated URL-scoped profile cookies and bounded geolocation', () => {
+    const name = 'validated-profile';
+    const cookie = {
+      name: 'sid',
+      value: '',
+      url: 'https://example.com/account',
+      expires: -1,
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
+    };
+    writeProfileFixture(`${name}.json`, {
+      ...profileFixture(name),
+      fingerprint: {
+        ...profileFixture(name).fingerprint,
+        geo: { latitude: -90, longitude: 180 },
+      },
+      cookies: [cookie],
+    });
+
+    expect(loadProfile(name)).toMatchObject({
+      fingerprint: { geo: { latitude: -90, longitude: 180 } },
+      cookies: [cookie],
+    });
+  });
+
+  it('rejects deeply malformed stored profile state', () => {
+    const validCookie = {
+      name: 'sid',
+      value: '123',
+      domain: '.example.com',
+      path: '/',
+    };
+    const malformedProfiles = [
+      (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, locale: ' ' } }),
+      (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, timezone: null } }),
+      (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, viewport: null } }),
+      (profile) => ({
+        ...profile,
+        fingerprint: {
+          ...profile.fingerprint,
+          viewport: { ...profile.fingerprint.viewport, width: 0 },
+        },
+      }),
+      (profile) => ({
+        ...profile,
+        fingerprint: {
+          ...profile.fingerprint,
+          viewport: { ...profile.fingerprint.viewport, height: '720' },
+        },
+      }),
+      (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, os: 'android' } }),
+      (profile) => ({ ...profile, fingerprint: { ...profile.fingerprint, geo: null } }),
+      (profile) => ({
+        ...profile,
+        fingerprint: {
+          ...profile.fingerprint,
+          geo: { latitude: 90.1, longitude: 0 },
+        },
+      }),
+      (profile) => ({
+        ...profile,
+        fingerprint: {
+          ...profile.fingerprint,
+          geo: { latitude: 0, longitude: -180.1 },
+        },
+      }),
+      (profile) => ({ ...profile, proxy: {} }),
+      (profile) => ({ ...profile, cookies: [{ ...validCookie, name: ' ' }] }),
+      (profile) => ({ ...profile, cookies: [{ ...validCookie, value: 123 }] }),
+      (profile) => ({ ...profile, cookies: [{ name: 'sid', value: '123', url: 'not-a-url' }] }),
+      (profile) => ({ ...profile, cookies: [{ name: 'sid', value: '123', domain: '.example.com' }] }),
+      (profile) => ({ ...profile, cookies: [{ ...validCookie, expires: 'never' }] }),
+      (profile) => ({ ...profile, cookies: [{ ...validCookie, httpOnly: 'true' }] }),
+      (profile) => ({ ...profile, cookies: [{ ...validCookie, secure: 1 }] }),
+      (profile) => ({ ...profile, cookies: [{ ...validCookie, sameSite: 'lax' }] }),
+    ];
+
+    malformedProfiles.forEach((mutate, index) => {
+      const name = `malformed-profile-${index}`;
+      writeProfileFixture(`${name}.json`, mutate(profileFixture(name)));
+      let error;
+      try {
+        loadProfile(name);
+      } catch (cause) {
+        error = cause;
+      }
+      expect(error).toMatchObject({ name: 'ProfileError', code: 8 });
+      expect(error?.message).toContain('invalid format');
+      expect(error).not.toBeInstanceOf(TypeError);
+    });
+  });
+
+  it('rejects malformed profile cookie snapshots before persisting them', () => {
+    createProfile(TEST_PROFILE, { preset: 'us-desktop' });
+
+    expect(() => saveProfileCookies(TEST_PROFILE, [
+      { name: 'sid', value: '123', domain: '.example.com' },
+    ])).toThrow('invalid cookie snapshot');
+  });
+
   it('should harden a legacy profile directory when loading through the SDK', () => {
     createProfile(TEST_PROFILE, { preset: 'us-desktop' });
     if (process.platform !== 'win32') {

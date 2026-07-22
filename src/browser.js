@@ -158,14 +158,18 @@ export async function launchBrowser(opts = {}) {
     restoreSessionUrl = true,
   } = opts;
 
+  const profileWasExplicit = Boolean(profileName);
   profileName = profileName ? assertStateName(profileName, "Profile") : undefined;
   sessionName = sessionName ? assertStateName(sessionName, "Session") : undefined;
 
   // A linked session carries its profile identity even when --profile is not
   // repeated. Re-read it after locking before trusting any mutable state.
   let sessionMetadata = sessionName ? getSession(sessionName) : null;
-  if (!profileName && sessionMetadata?.profile) {
-    profileName = assertStateName(sessionMetadata.profile, "Profile");
+  const preLockLinkedProfileName = sessionMetadata?.profile
+    ? assertStateName(sessionMetadata.profile, "Profile")
+    : null;
+  if (!profileWasExplicit && preLockLinkedProfileName) {
+    profileName = preLockLinkedProfileName;
   }
 
   const stateLease = acquireStateLocks({
@@ -176,6 +180,26 @@ export async function launchBrowser(opts = {}) {
   let context;
 
   try {
+    if (sessionName) {
+      sessionMetadata = getSession(sessionName);
+      const linkedProfileName = sessionMetadata.profile
+        ? assertStateName(sessionMetadata.profile, "Profile")
+        : null;
+      if (profileWasExplicit) {
+        if (linkedProfileName && linkedProfileName !== profileName) {
+          throw new ProfileError(
+            `Session "${sessionName}" belongs to profile "${linkedProfileName}", not "${profileName}"`,
+            { hint: 'Use the linked profile or choose a different --session name' },
+          );
+        }
+      } else if (linkedProfileName !== preLockLinkedProfileName) {
+        throw new ProfileError(
+          `Session "${sessionName}" profile link changed while the browser was starting`,
+          { hint: 'Retry the command after the session profile link is stable' },
+        );
+      }
+    }
+
     let profileData = null;
     if (profileName) {
       profileData = loadProfile(profileName);
@@ -184,19 +208,6 @@ export async function launchBrowser(opts = {}) {
       timezone = fp.timezone || timezone;
       viewport = fp.viewport || viewport;
       if (profileData.proxy && !proxyStr) proxyStr = profileData.proxy;
-    }
-
-    if (sessionName) {
-      sessionMetadata = getSession(sessionName);
-      const linkedProfileName = sessionMetadata.profile
-        ? assertStateName(sessionMetadata.profile, "Profile")
-        : null;
-      if (linkedProfileName && linkedProfileName !== profileName) {
-        throw new ProfileError(
-          `Session "${sessionName}" belongs to profile "${linkedProfileName}", not "${profileName}"`,
-          { hint: 'Use the linked profile or choose a different --session name' },
-        );
-      }
     }
 
     if (profileName) touchProfile(profileName, { lease: stateLease });

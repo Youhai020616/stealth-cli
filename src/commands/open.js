@@ -158,32 +158,40 @@ export async function runOpen(positionalUrl, opts) {
     signalGuard.dispose();
     const pendingSignal = signalGuard.pendingSignal;
 
-    let cleanupFailures = [];
+    const inheritedCleanupFailures = Array.isArray(error.cleanupFailures)
+      ? error.cleanupFailures
+      : [];
+    const cleanupFailures = [...inheritedCleanupFailures];
     if (lifecycle) {
       try {
         const result = await lifecycle.requestExit('command-error');
         if (result.reason !== 'command-error') {
           return reportLifecycleResult(result, hasPersistenceTarget);
         }
-        cleanupFailures = result.cleanupErrors || [];
+        cleanupFailures.push(...(result.cleanupErrors || []));
       } catch (cleanupError) {
         if (cleanupError !== error) {
-          cleanupFailures = cleanupError.cleanupFailures?.length > 0
-            ? cleanupError.cleanupFailures
-            : [{ target: 'lifecycle', error: cleanupError }];
+          cleanupFailures.push(...(
+            cleanupError.cleanupFailures?.length > 0
+              ? cleanupError.cleanupFailures
+              : [{ target: 'lifecycle', error: cleanupError }]
+          ));
         }
       }
     } else if (handle) {
       const cleanup = await closeBrowserForCli(handle, { log });
-      cleanupFailures = cleanup.cleanupErrors || [];
+      cleanupFailures.push(...(cleanup.cleanupErrors || []));
     }
 
+    attachCleanupFailures(error, cleanupFailures.slice(inheritedCleanupFailures.length));
     const primaryError = pendingSignal && !lifecycle
       ? new StealthError(`Interrupted by ${pendingSignal}`, {
         code: signalGuard.exitCode,
+        cause: error,
       })
       : error;
-    throw attachCleanupFailures(primaryError, cleanupFailures);
+    if (primaryError !== error) attachCleanupFailures(primaryError, cleanupFailures);
+    throw primaryError;
   }
 }
 

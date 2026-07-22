@@ -273,6 +273,44 @@ describe('launchBrowser', () => {
     expect(handle._meta.profileName).toBe('work');
   });
 
+  it.each([
+    ['null', null],
+    ['another profile', 'other'],
+  ])('rejects an inferred session profile changing from work to %s after locking', async (_label, linkedProfile) => {
+    getSession
+      .mockReturnValueOnce({ profile: 'work' })
+      .mockReturnValueOnce({ profile: linkedProfile });
+
+    await expect(launchBrowser({
+      session: 'login',
+      restoreSessionUrl: false,
+    })).rejects.toThrow('profile link changed while the browser was starting');
+
+    expect(acquireStateLocks).toHaveBeenCalledWith({ profile: 'work', session: 'login' });
+    expect(loadProfile).not.toHaveBeenCalled();
+    expect(touchProfile).not.toHaveBeenCalled();
+    expect(createBrowser).not.toHaveBeenCalled();
+  });
+
+  it('allows an explicit profile to bind a session that is null after locking', async () => {
+    getSession
+      .mockReturnValueOnce({ profile: 'work' })
+      .mockReturnValueOnce({ profile: null });
+    loadProfile.mockReturnValue(DEFAULT_PROFILE);
+    setupMockBrowser();
+
+    await expect(launchBrowser({
+      profile: 'work',
+      session: 'login',
+      restoreSessionUrl: false,
+    })).resolves.toMatchObject({
+      _meta: { profileName: 'work', sessionName: 'login' },
+    });
+
+    expect(loadProfile).toHaveBeenCalledWith('work');
+    expect(createBrowser).toHaveBeenCalledOnce();
+  });
+
   it('should preserve a saved session URL when an explicit target leaves the page blank', async () => {
     restoreSession.mockResolvedValue({
       lastUrl: 'https://saved.example/account',
@@ -374,11 +412,24 @@ describe('launchBrowser', () => {
     expect(handle._meta.proxyUrl).toBe('http://rotated-proxy:9090');
   });
 
-  it('should fail before browser launch when an explicit profile cannot load', async () => {
+  it('should fail before browser launch when an explicit profile is malformed', async () => {
     isDaemonRunning.mockReturnValue(false);
-    loadProfile.mockImplementation(() => { throw new Error('Profile not found'); });
+    loadProfile.mockImplementation(() => {
+      throw new ProfileError('Profile "malformed" has an invalid format');
+    });
 
-    await expect(launchBrowser({ profile: 'nonexistent' })).rejects.toThrow('Profile not found');
+    await expect(launchBrowser({ profile: 'malformed' })).rejects.toThrow('invalid format');
+    expect(createBrowser).not.toHaveBeenCalled();
+  });
+
+  it('should fail before locks and browser launch when a session is malformed', async () => {
+    getSession.mockImplementation(() => {
+      throw new ProfileError('Session "malformed" has an invalid format');
+    });
+
+    await expect(launchBrowser({ session: 'malformed' })).rejects.toThrow('invalid format');
+    expect(acquireStateLocks).not.toHaveBeenCalled();
+    expect(loadProfile).not.toHaveBeenCalled();
     expect(createBrowser).not.toHaveBeenCalled();
   });
 

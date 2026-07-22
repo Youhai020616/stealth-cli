@@ -28,6 +28,7 @@ import {
 } from './utils/storage-paths.js';
 
 const SESSION_METADATA_MIGRATIONS = new WeakSet();
+const VALID_COOKIE_SAME_SITES = new Set(['Strict', 'Lax', 'None']);
 
 function ensureDir() {
   const root = getStealthHome();
@@ -75,6 +76,60 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isValidCookieUrl(value) {
+  if (!isNonEmptyString(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function isValidCookie(cookie) {
+  if (
+    !isPlainObject(cookie)
+    || !isNonEmptyString(cookie.name)
+    || typeof cookie.value !== 'string'
+  ) {
+    return false;
+  }
+
+  const hasUrl = Object.hasOwn(cookie, 'url');
+  const hasDomain = Object.hasOwn(cookie, 'domain');
+  const hasPath = Object.hasOwn(cookie, 'path');
+  if (hasUrl && !isValidCookieUrl(cookie.url)) return false;
+  if (
+    (hasDomain || hasPath)
+    && (!isNonEmptyString(cookie.domain) || !isNonEmptyString(cookie.path))
+  ) {
+    return false;
+  }
+  if (!hasUrl && !(hasDomain && hasPath)) return false;
+
+  if (
+    Object.hasOwn(cookie, 'expires')
+    && (typeof cookie.expires !== 'number' || !Number.isFinite(cookie.expires))
+  ) {
+    return false;
+  }
+  for (const field of ['httpOnly', 'secure']) {
+    if (Object.hasOwn(cookie, field) && typeof cookie[field] !== 'boolean') return false;
+  }
+  if (
+    Object.hasOwn(cookie, 'sameSite')
+    && !VALID_COOKIE_SAME_SITES.has(cookie.sameSite)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function invalidSession(name, cause) {
   return new ProfileError(`Session "${name}" has an invalid format`, {
     hint: 'Use a new --session name or remove the invalid session file',
@@ -86,7 +141,7 @@ function normalizeSession(session, canonicalName, requestedName = canonicalName)
   if (
     !isPlainObject(session)
     || !Array.isArray(session.cookies)
-    || !session.cookies.every(isPlainObject)
+    || !session.cookies.every(isValidCookie)
     || !Array.isArray(session.history)
     || !session.history.every((entry) => typeof entry === 'string')
   ) {
@@ -216,7 +271,7 @@ export function saveSessionSnapshot(name, snapshot, opts = {}) {
   if (!isPlainObject(snapshot) || !Array.isArray(snapshot.cookies)) {
     throw new ProfileError(`Cannot save session "${name}": invalid cookie snapshot`);
   }
-  if (!snapshot.cookies.every(isPlainObject)) {
+  if (!snapshot.cookies.every(isValidCookie)) {
     throw new ProfileError(`Cannot save session "${name}": invalid cookie snapshot`);
   }
   if (

@@ -86,7 +86,7 @@ describe('session', () => {
   it('should save and reload a session', () => {
     const session = getSession('__test_save');
     session.lastUrl = 'https://example.com';
-    session.cookies = [{ name: 'sid', value: '123', domain: '.example.com' }];
+    session.cookies = [{ name: 'sid', value: '123', domain: '.example.com', path: '/' }];
     session.history = ['https://example.com', 'https://example.com/about'];
     saveSession('__test_save', session);
 
@@ -100,6 +100,23 @@ describe('session', () => {
       expect(fs.statSync(SESSIONS_DIR).mode & 0o777).toBe(0o700);
       expect(fs.statSync(path.join(SESSIONS_DIR, '__test_save.json')).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it('accepts fully validated URL-scoped session cookies', () => {
+    const name = '__test_url_cookie';
+    const cookie = {
+      name: 'sid',
+      value: '',
+      url: 'https://example.com/account',
+      expires: -1,
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Strict',
+    };
+
+    saveSession(name, sessionFixture({ name, cookies: [cookie] }));
+
+    expect(getSession(name).cookies).toEqual([cookie]);
   });
 
   it('should accept safe session names and reject path-like names', () => {
@@ -326,20 +343,37 @@ describe('session', () => {
   });
 
   it('rejects malformed loaded sessions with ProfileError before browser use', () => {
-    const malformed = [
-      [],
-      sessionFixture({ cookies: {} }),
-      sessionFixture({ history: {} }),
-      sessionFixture({ cookies: [null] }),
-      sessionFixture({ history: [42] }),
-      sessionFixture({ profile: 42 }),
-      sessionFixture({ lastUrl: {} }),
-      sessionFixture({ name: 42 }),
+    const validCookie = {
+      name: 'sid',
+      value: '123',
+      domain: '.example.com',
+      path: '/',
+    };
+    const malformedSessions = [
+      () => [],
+      (session) => ({ ...session, cookies: {} }),
+      (session) => ({ ...session, history: {} }),
+      (session) => ({ ...session, cookies: [null] }),
+      (session) => ({ ...session, history: [42] }),
+      (session) => ({ ...session, profile: 42 }),
+      (session) => ({ ...session, lastUrl: {} }),
+      (session) => ({ ...session, name: 42 }),
+      (session) => ({ ...session, cookies: [{ ...validCookie, name: '' }] }),
+      (session) => ({ ...session, cookies: [{ ...validCookie, value: null }] }),
+      (session) => ({ ...session, cookies: [{ name: 'sid', value: '123', url: '' }] }),
+      (session) => ({ ...session, cookies: [{ name: 'sid', value: '123', path: '/' }] }),
+      (session) => ({ ...session, cookies: [{ ...validCookie, expires: false }] }),
+      (session) => ({ ...session, cookies: [{ ...validCookie, httpOnly: 1 }] }),
+      (session) => ({ ...session, cookies: [{ ...validCookie, secure: 'false' }] }),
+      (session) => ({ ...session, cookies: [{ ...validCookie, sameSite: 'invalid' }] }),
     ];
 
-    malformed.forEach((value, index) => {
+    malformedSessions.forEach((mutate, index) => {
       const name = `malformed_${index}`;
-      writeSessionFixture(`${name}.json`, value);
+      writeSessionFixture(
+        `${name}.json`,
+        mutate(sessionFixture({ name })),
+      );
       let error;
       try {
         getSession(name);
@@ -348,8 +382,16 @@ describe('session', () => {
       }
       expect(error?.name).toBe('ProfileError');
       expect(error?.code).toBe(8);
+      expect(error?.message).toContain('invalid format');
       expect(error).not.toBeInstanceOf(TypeError);
     });
+  });
+
+  it('rejects malformed session cookie snapshots before persisting them', () => {
+    expect(() => saveSessionSnapshot('__test_bad_cookie', {
+      cookies: [{ name: 'sid', value: '123', domain: '.example.com' }],
+      lastUrl: null,
+    })).toThrow('invalid cookie snapshot');
   });
 
   it('distinguishes unreadable session files from corrupted JSON', () => {

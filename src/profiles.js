@@ -101,6 +101,8 @@ const VIEWPORTS = [
 ];
 
 const PROFILE_METADATA_MIGRATIONS = new WeakSet();
+const VALID_PROFILE_OSES = new Set(['macos', 'windows', 'linux']);
+const VALID_COOKIE_SAME_SITES = new Set(['Strict', 'Lax', 'None']);
 
 const LOCALES = [
   { locale: 'en-US', tz: 'America/New_York', geo: { latitude: 40.7128, longitude: -74.006 } },
@@ -156,6 +158,91 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isValidCookieUrl(value) {
+  if (!isNonEmptyString(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function isValidCookie(cookie) {
+  if (
+    !isPlainObject(cookie)
+    || !isNonEmptyString(cookie.name)
+    || typeof cookie.value !== 'string'
+  ) {
+    return false;
+  }
+
+  const hasUrl = Object.hasOwn(cookie, 'url');
+  const hasDomain = Object.hasOwn(cookie, 'domain');
+  const hasPath = Object.hasOwn(cookie, 'path');
+  if (hasUrl && !isValidCookieUrl(cookie.url)) return false;
+  if (
+    (hasDomain || hasPath)
+    && (!isNonEmptyString(cookie.domain) || !isNonEmptyString(cookie.path))
+  ) {
+    return false;
+  }
+  if (!hasUrl && !(hasDomain && hasPath)) return false;
+
+  if (
+    Object.hasOwn(cookie, 'expires')
+    && (typeof cookie.expires !== 'number' || !Number.isFinite(cookie.expires))
+  ) {
+    return false;
+  }
+  for (const field of ['httpOnly', 'secure']) {
+    if (Object.hasOwn(cookie, field) && typeof cookie[field] !== 'boolean') return false;
+  }
+  if (
+    Object.hasOwn(cookie, 'sameSite')
+    && !VALID_COOKIE_SAME_SITES.has(cookie.sameSite)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isValidFingerprint(fingerprint) {
+  if (
+    !isPlainObject(fingerprint)
+    || !isNonEmptyString(fingerprint.locale)
+    || !isNonEmptyString(fingerprint.timezone)
+    || !isPlainObject(fingerprint.viewport)
+    || !Number.isFinite(fingerprint.viewport.width)
+    || fingerprint.viewport.width <= 0
+    || !Number.isFinite(fingerprint.viewport.height)
+    || fingerprint.viewport.height <= 0
+    || !VALID_PROFILE_OSES.has(fingerprint.os)
+  ) {
+    return false;
+  }
+
+  if (fingerprint.geo !== undefined) {
+    if (
+      !isPlainObject(fingerprint.geo)
+      || !Number.isFinite(fingerprint.geo.latitude)
+      || fingerprint.geo.latitude < -90
+      || fingerprint.geo.latitude > 90
+      || !Number.isFinite(fingerprint.geo.longitude)
+      || fingerprint.geo.longitude < -180
+      || fingerprint.geo.longitude > 180
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function invalidProfile(name, cause) {
   return new ProfileError(`Profile "${name}" has an invalid format`, {
     hint: `Delete and recreate it: stealth profile delete ${name}`,
@@ -164,7 +251,13 @@ function invalidProfile(name, cause) {
 }
 
 function normalizeProfile(profile, canonicalName, requestedName = canonicalName) {
-  if (!isPlainObject(profile) || !isPlainObject(profile.fingerprint)) {
+  if (
+    !isPlainObject(profile)
+    || !isValidFingerprint(profile.fingerprint)
+    || (profile.proxy !== null && typeof profile.proxy !== 'string')
+    || !Array.isArray(profile.cookies)
+    || !profile.cookies.every(isValidCookie)
+  ) {
     throw invalidProfile(requestedName);
   }
   if (profile.name !== undefined && profile.name !== null) {
@@ -173,9 +266,6 @@ function normalizeProfile(profile, canonicalName, requestedName = canonicalName)
     } catch (cause) {
       throw invalidProfile(requestedName, cause);
     }
-  }
-  if (profile.cookies !== undefined && !Array.isArray(profile.cookies)) {
-    throw invalidProfile(requestedName);
   }
   return { ...profile, name: canonicalName };
 }
@@ -360,7 +450,7 @@ export function touchProfile(name, opts = {}) {
  * @returns {number} Number of cookies in the snapshot
  */
 export function saveProfileCookies(name, cookies, opts = {}) {
-  if (!Array.isArray(cookies)) {
+  if (!Array.isArray(cookies) || !cookies.every(isValidCookie)) {
     throw new ProfileError(`Cannot save profile "${name}": invalid cookie snapshot`);
   }
 

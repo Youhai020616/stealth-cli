@@ -384,13 +384,12 @@ export function createBrowserLifecycle(handle, opts = {}) {
     };
 
     if (fatalPersistenceError && cleanupErrors.length > 0) {
-      const cleanupFailures = cleanupErrors.map(({ target }) => ({ target }));
-      const targets = cleanupFailures.map(({ target }) => target).join(', ');
+      const targets = cleanupErrors.map(({ target }) => target).join(', ');
       throw new PersistenceError(
         `${fatalPersistenceError.message}; browser cleanup also failed (${targets})`,
         {
           cause: fatalPersistenceError,
-          cleanupFailures,
+          cleanupFailures: cleanupErrors,
           failures: fatalPersistenceError.failures,
           results: fatalPersistenceError.results,
           snapshotMetadata: fatalPersistenceError.snapshotMetadata,
