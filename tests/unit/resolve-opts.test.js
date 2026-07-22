@@ -1,20 +1,28 @@
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { resolveOpts } from '../../src/utils/resolve-opts.js';
-import { setConfigValue, resetConfig, CONFIG_FILE } from '../../src/config.js';
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 
-let originalConfig = null;
+const ORIGINAL_HOME = process.env.HOME;
+const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-resolve-opts-home-'));
+process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
+vi.resetModules();
+
+const { resolveOpts } = await import('../../src/utils/resolve-opts.js');
+const { setConfigValue, resetConfig } = await import('../../src/config.js');
 
 beforeEach(() => {
-  try {
-    originalConfig = fs.existsSync(CONFIG_FILE) ? fs.readFileSync(CONFIG_FILE, 'utf-8') : null;
-  } catch {}
   resetConfig();
 });
 
 afterAll(() => {
-  if (originalConfig) fs.writeFileSync(CONFIG_FILE, originalConfig);
-  else resetConfig();
+  if (ORIGINAL_HOME === undefined) delete process.env.HOME;
+  else process.env.HOME = ORIGINAL_HOME;
+  if (ORIGINAL_USERPROFILE === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = ORIGINAL_USERPROFILE;
+  fs.rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
 describe('resolveOpts', () => {
