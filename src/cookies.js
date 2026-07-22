@@ -20,11 +20,14 @@ export function parseCookieFile(filePath, filterDomain) {
 
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
+    if (!trimmed) continue;
 
-    // Skip comments and empty lines
-    if (!trimmed || trimmed.startsWith('#')) continue;
+    // Netscape marks HttpOnly cookies with a comment-like domain prefix.
+    const httpOnly = trimmed.startsWith('#HttpOnly_');
+    if (trimmed.startsWith('#') && !httpOnly) continue;
+    const cookieLine = httpOnly ? trimmed.slice('#HttpOnly_'.length) : trimmed;
 
-    const parts = trimmed.split('\t');
+    const parts = cookieLine.split('\t');
     if (parts.length < 7) continue;
 
     const [domain, , path, secure, expires, name, value] = parts;
@@ -43,7 +46,7 @@ export function parseCookieFile(filePath, filterDomain) {
       domain,
       path: path || '/',
       expires: parseInt(expires) || -1,
-      httpOnly: false,
+      httpOnly,
       secure: secure.toLowerCase() === 'true',
       sameSite: 'Lax',
     });
