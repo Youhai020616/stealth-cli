@@ -150,7 +150,7 @@ describe('error classes', () => {
     expect(JSON.stringify(err)).toBe(JSON.stringify({
       message: 'save failed',
       code: 8,
-      hint: 'Authentication state was not fully saved; keep the browser open and retry',
+      hint: 'Authentication state was not fully saved; fix the reported storage issue before relying on or reusing this state',
     }));
     expect(inspect(err)).not.toContain('cause-secret');
     expect(JSON.stringify({ ...err })).not.toContain('super-secret');

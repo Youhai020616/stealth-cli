@@ -18,6 +18,15 @@ function reportProfileError(error) {
   process.exitCode = handleError(profileError, { log, exit: false });
 }
 
+function profileForDisplay(profile) {
+  const { cookies, ...safeProfile } = profile;
+  return {
+    ...safeProfile,
+    proxy: profile.proxy ? maskProxyUrl(profile.proxy) : null,
+    cookieCount: Array.isArray(cookies) ? cookies.length : 0,
+  };
+}
+
 export function registerProfile(program) {
   const profile = program
     .command('profile')
@@ -88,7 +97,7 @@ export function registerProfile(program) {
     .action((name) => {
       try {
         const p = loadProfile(name);
-        console.log(JSON.stringify(p, null, 2));
+        console.log(JSON.stringify(profileForDisplay(p), null, 2));
       } catch (err) {
         reportProfileError(err);
       }

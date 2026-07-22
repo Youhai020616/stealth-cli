@@ -4,6 +4,7 @@ import {
   deleteConfigValue, listConfig, resetConfig, CONFIG_FILE,
 } from '../../src/config.js';
 import fs from 'fs';
+import path from 'path';
 
 // Save and restore original config
 let originalConfig = null;
@@ -48,6 +49,17 @@ describe('config', () => {
   it('should set and get number values', () => {
     setConfigValue('timeout', '5000');
     expect(getConfigValue('timeout')).toBe(5000);
+  });
+
+  it('should store proxy credentials in owner-only config storage', () => {
+    const proxy = 'http://api-token:proxy-secret@proxy.example:8080';
+    setConfigValue('proxy', proxy);
+
+    expect(getConfigValue('proxy')).toBe(proxy);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(path.dirname(CONFIG_FILE)).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(CONFIG_FILE).mode & 0o777).toBe(0o600);
+    }
   });
 
   it('should reject unknown keys', () => {

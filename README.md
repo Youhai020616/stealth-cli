@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D20-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-201%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-366%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -259,7 +259,7 @@ When `--profile` and `--session` are combined, the profile is the canonical cook
 
 Named profile and session browser state is single-writer. Browser lifetimes and standalone create/save/delete operations all participate in the same lock protocol, so concurrent mutation fails instead of mixing identities. Lock files are never removed automatically after a crash: when the recorded owner is no longer running, stealth-cli prints the exact lock path and requires explicit removal after you confirm no process still owns that state. Profile and session JSON files contain authentication material; writes are atomic. On POSIX platforms, directories and files are enforced to owner-only modes (`0700` and `0600`). Windows does not provide equivalent POSIX mode-bit enforcement, so protect `STEALTH_HOME` with user-only Windows ACLs and do not place it in a shared directory.
 
-By default, profiles, sessions, and their locks live under `~/.stealth`. Set `STEALTH_HOME` to relocate those paths together. The configured state root and child paths must not be symlinks. Configuration (`config.json`), proxy-pool (`proxies.json`), and daemon socket/PID paths remain under `~/.stealth` in the current source. A hard browser crash can only preserve state captured by the most recent checkpoint; `open` defaults to a one-second interval.
+By default, profiles, sessions, and their locks live under `~/.stealth`. Set `STEALTH_HOME` to relocate those paths together. The configured state root and child paths must not be symlinks. Configuration (`config.json`), proxy-pool (`proxies.json`), and daemon socket/PID paths remain under `~/.stealth` in the current source; config and proxy-pool files are stored with the same owner-only POSIX directory/file modes (`0700`/`0600`). Windows users must protect these paths with user-only ACLs. A hard browser crash can only preserve state captured by the most recent checkpoint; `open` defaults to a one-second interval.
 
 ### Proxy Pool
 
@@ -358,19 +358,42 @@ Add stealth browsing capabilities to your AI coding assistant:
 Use stealth-cli programmatically in your Node.js applications. The `work` profile must be created first, either with `stealth profile create work --preset us-desktop` or the SDK's `createProfile('work', { preset: 'us-desktop' })` API.
 
 ```javascript
-import { launchBrowser, closeBrowser, navigate, getTextContent } from 'stealth-cli';
+import {
+  launchBrowser,
+  closeBrowser,
+  checkpointBrowserState,
+  navigate,
+  getTextContent,
+} from 'stealth-cli';
 
 const handle = await launchBrowser({ profile: 'work', humanize: true });
+let operationError = null;
 try {
   await navigate(handle, 'https://example.com');
   const text = await getTextContent(handle);
   console.log(text);
-} finally {
-  await closeBrowser(handle, { strict: true });
+  await checkpointBrowserState(handle); // Optional durable checkpoint while still open
+} catch (error) {
+  operationError = error;
 }
+
+let closeError = null;
+try {
+  await closeBrowser(handle, { strict: true });
+} catch (error) {
+  closeError = error;
+}
+
+if (operationError && closeError) {
+  throw new AggregateError([operationError, closeError], 'Browser operation and cleanup both failed');
+}
+if (operationError) throw operationError;
+if (closeError) throw closeError;
 ```
 
-`closeBrowser(handle)` is best-effort by default: it attempts persistence and cleanup, then returns `{ persistence, persistenceError, cleanupErrors }` instead of throwing for those failures. Inspect both error fields if you use the default mode. With `{ strict: true }`, cleanup is still attempted, then a `PersistenceError` or `BrowserCleanupError` is thrown when work remains incomplete. Persistence is captured at most once; calling `closeBrowser(handle)` again retries only unfinished context, browser, or state-lock cleanup. Retry the same handle before reusing its named profile/session.
+`closeBrowser(handle)` is best-effort by default: it attempts persistence and cleanup, then returns `{ persistence, persistenceError, cleanupErrors }` instead of throwing for those failures. Inspect both error fields if you use the default mode. With `{ strict: true }`, cleanup is still attempted, then an exported `PersistenceError` or `BrowserCleanupError` is thrown when work remains incomplete. Persistence is captured at most once; calling `closeBrowser(handle)` again retries only unfinished context, browser, or state-lock cleanup and never recaptures persistence. Fix the reported storage issue before repeating an authentication flow whose final persistence failed, and retry the same handle only for unfinished cleanup before reusing its named profile/session.
+
+Use `checkpointBrowserState(handle)` for manual mid-run persistence on a handle launched with a named profile or session; it reuses the private browser-owned lease. The lower-level `captureSession(name, context, page)` API remains suitable for independently managed contexts, but it cannot acquire a session name already owned by a live `launchBrowser()` handle.
 
 A successful `result.persistence.snapshot` can contain cookie values and the raw last URL, and error objects retain non-enumerable diagnostic fields such as `.cause` or `.url`. Do not log, serialize, or return browser handles or raw close results across trust boundaries. Store `STEALTH_HOME` as sensitive authentication state. Error `toJSON()` output is redacted for routine logging, but the in-memory objects must still be treated as sensitive.
 
@@ -415,8 +438,8 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 ```
 Version:     0.6.1
 Commands:    17
-Tests:       201 passing (23 test files)
-Source:      8,066 lines (45 JavaScript files under `src/`)
+Tests:       366 passing (28 test files)
+Source:      10,944 lines (49 JavaScript files under `src/`)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)

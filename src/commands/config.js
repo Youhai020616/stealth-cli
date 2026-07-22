@@ -8,6 +8,12 @@ import {
   listConfig, resetConfig, CONFIG_FILE,
 } from '../config.js';
 import { log } from '../output.js';
+import { maskProxyUrl } from '../utils/proxy.js';
+
+function configValueForDisplay(key, value) {
+  if (key === 'proxy' && value !== null) return maskProxyUrl(value);
+  return value;
+}
 
 export function registerConfig(program) {
   const config = program
@@ -25,7 +31,8 @@ export function registerConfig(program) {
       console.log(chalk.dim('  ' + '─'.repeat(55)));
 
       for (const item of items) {
-        const val = item.value === null ? chalk.dim('null') : String(item.value);
+        const displayValue = configValueForDisplay(item.key, item.value);
+        const val = displayValue === null ? chalk.dim('null') : String(displayValue);
         const src = item.source === 'user' ? chalk.cyan('user') : chalk.dim('default');
         console.log(`  ${item.key.padEnd(20)} ${val.padEnd(25)} ${src}`);
       }
@@ -41,7 +48,7 @@ export function registerConfig(program) {
     .action((key) => {
       try {
         const value = getConfigValue(key);
-        console.log(value);
+        console.log(configValueForDisplay(key, value));
       } catch (err) {
         log.error(err.message);
         process.exit(1);
@@ -57,7 +64,7 @@ export function registerConfig(program) {
     .action((key, value) => {
       try {
         const result = setConfigValue(key, value);
-        log.success(`${key} = ${result}`);
+        log.success(`${key} = ${configValueForDisplay(key, result)}`);
       } catch (err) {
         log.error(err.message);
         process.exit(1);

@@ -363,6 +363,52 @@ describe('state lock journals', () => {
     session();
   });
 
+  it('detects path replacement during failed-acquisition release publication', () => {
+    const stale = claimRecord('profile', 'rollback-window', {
+      pid: 2_147_483_647,
+      createdAt: new Date(0).toISOString(),
+    });
+    const journalPath = writeJournal('profile', 'rollback-window', [stale]);
+    const displacedPath = `${journalPath}.displaced`;
+    const replacementPath = `${journalPath}.replacement`;
+    const writeSync = fs.writeSync.bind(fs);
+    let contenderToken;
+    let swapped = false;
+
+    vi.spyOn(fs, 'writeSync').mockImplementation((descriptor, buffer, ...args) => {
+      const record = JSON.parse(buffer.toString('utf8').trim());
+      if (record.op === 'claim' && record.token !== stale.token) contenderToken = record.token;
+      if (record.op === 'release' && record.token === contenderToken && !swapped) {
+        swapped = true;
+        fs.copyFileSync(journalPath, replacementPath);
+        fs.renameSync(journalPath, displacedPath);
+        fs.renameSync(replacementPath, journalPath);
+      }
+      return writeSync(descriptor, buffer, ...args);
+    });
+
+    let failure;
+    try {
+      acquireStateLocks({ profile: 'rollback-window' });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.message).toContain('stale lock claim');
+    expect(failure?.cleanupFailures).toEqual([
+      expect.objectContaining({
+        target: 'profile:rollback-window',
+        error: expect.objectContaining({
+          hint: journalRemovalHint(journalPath),
+        }),
+      }),
+    ]);
+    expect(activeClaims(readJournalRecords(journalPath)).map(({ token }) => token))
+      .toEqual([stale.token, contenderToken]);
+    expect(readJournalRecords(displacedPath).map(({ op }) => op))
+      .toEqual(['claim', 'claim', 'release']);
+  });
+
   it('fails closed on a dead local claim and appends release for its failed contender claim', () => {
     const stalePid = 2_147_483_647;
     const stale = claimRecord('profile', 'work', {
@@ -595,6 +641,89 @@ describe('state lock journals', () => {
     ).toHaveLength(1);
 
     vi.restoreAllMocks();
+    successor();
+  });
+
+  it('detects a copied active claim when the path changes during release append', () => {
+    const lease = acquireStateLocks({ profile: 'write-window' });
+    const journalPath = stateLockPath('profile', 'write-window');
+    const displacedPath = `${journalPath}.displaced`;
+    const replacementPath = `${journalPath}.replacement`;
+    const claimContents = fs.readFileSync(journalPath, 'utf8');
+    fs.writeFileSync(replacementPath, claimContents, { mode: 0o600 });
+    const writeSync = fs.writeSync.bind(fs);
+    let swapped = false;
+
+    vi.spyOn(fs, 'writeSync').mockImplementation((descriptor, buffer, ...args) => {
+      const record = JSON.parse(buffer.toString('utf8').trim());
+      if (record.op === 'release' && !swapped) {
+        swapped = true;
+        fs.renameSync(journalPath, displacedPath);
+        fs.renameSync(replacementPath, journalPath);
+      }
+      return writeSync(descriptor, buffer, ...args);
+    });
+
+    let failure;
+    try {
+      lease();
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'ProfileError',
+      hint: journalRemovalHint(journalPath),
+    });
+    expect(failure.message).toContain('still contains this process\'s active claim');
+    expect(lease.owns('profile', 'write-window')).toBe(false);
+    expect(fs.readFileSync(journalPath, 'utf8')).toBe(claimContents);
+    expect(readJournalRecords(displacedPath).map(({ op }) => op)).toEqual(['claim', 'release']);
+
+    vi.restoreAllMocks();
+    fs.rmSync(journalPath);
+    expect(() => lease()).not.toThrow();
+  });
+
+  it('retains a failed replacement-inspection close across release retries', () => {
+    const oldLease = acquireStateLocks({ profile: 'inspection-close' });
+    const journalPath = stateLockPath('profile', 'inspection-close');
+    const displacedPath = `${journalPath}.displaced`;
+    fs.renameSync(journalPath, displacedPath);
+    const successor = acquireStateLocks({ profile: 'inspection-close' });
+    const successorContents = fs.readFileSync(journalPath, 'utf8');
+    const openSync = fs.openSync.bind(fs);
+    const closeSync = fs.closeSync.bind(fs);
+    let inspectionDescriptor;
+    let inspectionOpenCount = 0;
+
+    vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
+      const descriptor = openSync(target, ...args);
+      if (target === journalPath) {
+        inspectionDescriptor = descriptor;
+        inspectionOpenCount += 1;
+      }
+      return descriptor;
+    });
+    vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+      if (descriptor === inspectionDescriptor) {
+        const error = new Error('replacement inspection close failed');
+        error.code = 'EIO';
+        throw error;
+      }
+      return closeSync(descriptor);
+    });
+
+    expect(() => oldLease()).toThrow('could not be inspected safely');
+    expect(inspectionOpenCount).toBe(1);
+    expect(() => oldLease()).toThrow('replacement inspection close failed');
+    expect(inspectionOpenCount).toBe(1);
+    expect(oldLease.owns('profile', 'inspection-close')).toBe(false);
+    expect(fs.readFileSync(journalPath, 'utf8')).toBe(successorContents);
+
+    vi.restoreAllMocks();
+    expect(() => oldLease()).not.toThrow();
+    expect(successor.owns('profile', 'inspection-close')).toBe(true);
     successor();
   });
 

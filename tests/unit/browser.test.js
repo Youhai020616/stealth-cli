@@ -74,7 +74,7 @@ import {
   closeBrowser,
   captureBrowserState,
   writeBrowserStateSnapshot,
-  persistBrowserState,
+  checkpointBrowserState,
   navigate,
   getTextContent,
   getSnapshot,
@@ -585,13 +585,26 @@ describe('launchBrowser', () => {
     expect(stateLease).toHaveBeenCalledOnce();
   });
 
-  it('should release state locks when browser creation fails', async () => {
+  it('should release state locks without exposing browser launch internals', async () => {
     const stateLease = createStateLease({ session: 'login' });
+    const cause = new Error('launch failed password=do-not-leak');
     acquireStateLocks.mockReturnValue(stateLease);
-    createBrowser.mockRejectedValue(new Error('launch failed'));
+    createBrowser.mockRejectedValue(cause);
 
-    await expect(launchBrowser({ session: 'login' })).rejects.toThrow('launch failed');
+    let failure;
+    try {
+      await launchBrowser({ session: 'login' });
+    } catch (error) {
+      failure = error;
+    }
 
+    expect(failure).toMatchObject({
+      name: 'BrowserLaunchError',
+      message: 'Failed to launch browser',
+      cause,
+    });
+    expect(JSON.stringify(failure)).not.toContain('do-not-leak');
+    expect(Object.getOwnPropertyDescriptor(failure, 'cause')?.enumerable).toBe(false);
     expect(stateLease).toHaveBeenCalledOnce();
   });
 
@@ -694,7 +707,7 @@ describe('browser state persistence', () => {
       stateLease,
     );
 
-    const result = await persistBrowserState(handle);
+    const result = await checkpointBrowserState(handle);
 
     expect(mocks.mockContext.cookies).toHaveBeenCalledOnce();
     expect(saveProfileCookies).toHaveBeenCalledWith('work', cookies, {

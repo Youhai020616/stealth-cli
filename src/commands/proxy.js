@@ -8,8 +8,18 @@ import {
   addProxy, removeProxy, listProxies,
   testProxy, testAllProxies, poolSize,
 } from '../proxy-pool.js';
+import { ProxyError, handleError } from '../errors.js';
 import { log } from '../output.js';
 import { maskProxyUrl } from '../utils/proxy.js';
+
+function reportProxyError(error, operation, proxyUrl = null) {
+  const proxyError = error instanceof ProxyError
+    ? error
+    : new ProxyError(proxyUrl, error, {
+      message: `Failed to ${operation} proxy pool`,
+    });
+  process.exitCode = handleError(proxyError, { log, exit: false });
+}
 
 export function registerProxy(program) {
   const proxy = program
@@ -28,7 +38,7 @@ export function registerProxy(program) {
         const count = addProxy(url, opts);
         log.success(`Proxy added (${count} total in pool)`);
       } catch (err) {
-        log.error(err.message);
+        reportProxyError(err, 'update', url);
       }
     });
 
@@ -42,7 +52,7 @@ export function registerProxy(program) {
         removeProxy(url);
         log.success('Proxy removed');
       } catch (err) {
-        log.error(err.message);
+        reportProxyError(err, 'update', url);
       }
     });
 
@@ -51,24 +61,28 @@ export function registerProxy(program) {
     .command('list')
     .description('List all proxies')
     .action(() => {
-      const proxies = listProxies();
-      if (proxies.length === 0) {
-        log.info('No proxies configured. Add one with: stealth proxy add <url>');
-        return;
-      }
+      try {
+        const proxies = listProxies();
+        if (proxies.length === 0) {
+          log.info('No proxies configured. Add one with: stealth proxy add <url>');
+          return;
+        }
 
-      console.log(chalk.bold('\n  Proxy Pool:\n'));
-      const header = `  ${'URL'.padEnd(40)} ${'Label'.padEnd(10)} ${'Status'.padEnd(8)} ${'Latency'.padEnd(10)} ${'Uses'.padEnd(6)} ${'Fails'.padEnd(6)}`;
-      console.log(chalk.dim(header));
-      console.log(chalk.dim('  ' + '─'.repeat(84)));
+        console.log(chalk.bold('\n  Proxy Pool:\n'));
+        const header = `  ${'URL'.padEnd(40)} ${'Label'.padEnd(10)} ${'Status'.padEnd(8)} ${'Latency'.padEnd(10)} ${'Uses'.padEnd(6)} ${'Fails'.padEnd(6)}`;
+        console.log(chalk.dim(header));
+        console.log(chalk.dim('  ' + '─'.repeat(84)));
 
-      for (const p of proxies) {
-        const statusColor = p.status === 'ok' ? chalk.green : p.status === 'fail' ? chalk.red : chalk.dim;
-        console.log(
-          `  ${p.url.padEnd(40).slice(0, 40)} ${p.label.padEnd(10)} ${statusColor(p.status.padEnd(8))} ${p.latency.padEnd(10)} ${String(p.useCount).padEnd(6)} ${String(p.failCount).padEnd(6)}`,
-        );
+        for (const p of proxies) {
+          const statusColor = p.status === 'ok' ? chalk.green : p.status === 'fail' ? chalk.red : chalk.dim;
+          console.log(
+            `  ${p.url.padEnd(40).slice(0, 40)} ${p.label.padEnd(10)} ${statusColor(p.status.padEnd(8))} ${p.latency.padEnd(10)} ${String(p.useCount).padEnd(6)} ${String(p.failCount).padEnd(6)}`,
+          );
+        }
+        console.log();
+      } catch (err) {
+        reportProxyError(err, 'read');
       }
-      console.log();
     });
 
   // stealth proxy test [url]
@@ -77,41 +91,51 @@ export function registerProxy(program) {
     .description('Test proxy connectivity')
     .argument('[url]', 'Specific proxy URL to test (or test all)')
     .action(async (url) => {
-      if (url) {
-        const spinner = ora(`Testing ${maskProxyUrl(url)}...`).start();
-        const result = await testProxy(url);
-        spinner.stop();
+      let spinner;
+      try {
+        if (url) {
+          spinner = ora(`Testing ${maskProxyUrl(url)}...`).start();
+          const result = await testProxy(url);
+          spinner.stop();
+          spinner = undefined;
 
-        if (result.ok) {
-          log.success(`Proxy OK — IP: ${result.ip}, Latency: ${result.latency}ms`);
-        } else {
-          log.error(`Proxy FAILED — ${result.error}`);
-        }
-      } else {
-        const size = poolSize();
-        if (size === 0) {
-          log.info('No proxies to test');
-          return;
-        }
-
-        const spinner = ora(`Testing ${size} proxies...`).start();
-        const results = await testAllProxies();
-        spinner.stop();
-
-        let ok = 0;
-        let fail = 0;
-        for (const r of results) {
-          if (r.ok) {
-            ok++;
-            log.success(`${r.proxy} — IP: ${r.ip}, ${r.latency}ms`);
+          if (result.ok) {
+            log.success(`Proxy OK — IP: ${result.ip}, Latency: ${result.latency}ms`);
           } else {
-            fail++;
-            log.error(`${r.proxy} — ${r.error}`);
+            log.error(`Proxy FAILED — ${result.error}`);
+            process.exitCode = 7;
           }
-        }
+        } else {
+          const size = poolSize();
+          if (size === 0) {
+            log.info('No proxies to test');
+            return;
+          }
 
-        console.log();
-        log.info(`Results: ${chalk.green(`${ok} ok`)} / ${chalk.red(`${fail} failed`)} / ${size} total`);
+          spinner = ora(`Testing ${size} proxies...`).start();
+          const results = await testAllProxies();
+          spinner.stop();
+          spinner = undefined;
+          let ok = 0;
+          let fail = 0;
+          for (const r of results) {
+            if (r.ok) {
+              ok++;
+              log.success(`${r.proxy} — IP: ${r.ip}, ${r.latency}ms`);
+            } else {
+              fail++;
+              log.error(`${r.proxy} — ${r.error}`);
+            }
+          }
+
+          console.log();
+          log.info(`Results: ${chalk.green(`${ok} ok`)} / ${chalk.red(`${fail} failed`)} / ${size} total`);
+          if (fail > 0) process.exitCode = 7;
+        }
+      } catch (err) {
+        reportProxyError(err, 'test', url);
+      } finally {
+        spinner?.stop();
       }
     });
 }

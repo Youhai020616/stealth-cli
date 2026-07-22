@@ -16,6 +16,7 @@ import { isValidPersistedCookie } from './profiles.js';
 import {
   ensurePrivateDirectory,
   ensurePrivateFile,
+  readPrivateFile,
   writeJsonAtomic,
 } from './utils/json-file.js';
 import { withStateLock } from './utils/state-lock.js';
@@ -135,25 +136,29 @@ export function validateStoredSession(session, canonicalName, requestedName = ca
 }
 
 function readSession(location, requestedName = location.name) {
-  try {
-    ensurePrivateFile(location.filePath);
-  } catch (cause) {
-    if (cause.code === 'ENOENT') return null;
-    throw new ProfileError(`Session "${requestedName}" cannot be accessed securely`, {
-      hint: `Fix permissions and path type for: ${location.filePath}`,
-      cause,
-    });
-  }
-
   let contents;
   try {
-    contents = fs.readFileSync(location.filePath, 'utf8');
+    contents = readPrivateFile(location.filePath, { encoding: 'utf8' });
   } catch (cause) {
     if (cause.code === 'ENOENT') return null;
-    throw new ProfileError(`Session "${requestedName}" could not be read`, {
-      hint: `Check access permissions for: ${location.filePath}`,
-      cause,
-    });
+    const securityFailure = [
+      'EUNSAFESTATEPATH',
+      'EINSECUREPERMISSIONS',
+      'EINVALIDSTATEOWNER',
+      'ESTATEPATHREPLACED',
+      'ESTATEFILECHANGED',
+    ].includes(cause.code);
+    throw new ProfileError(
+      securityFailure
+        ? `Session "${requestedName}" cannot be accessed securely`
+        : `Session "${requestedName}" could not be read`,
+      {
+        hint: securityFailure
+          ? `Fix ownership, permissions, and path type for: ${location.filePath}`
+          : `Check access permissions for: ${location.filePath}`,
+        cause,
+      },
+    );
   }
 
   let session;
@@ -300,6 +305,9 @@ export function saveSessionSnapshot(name, snapshot, opts = {}) {
 
 /**
  * Capture and save current browser state to a session.
+ *
+ * For a context owned by launchBrowser({ session }), use the handle-scoped
+ * checkpointBrowserState(handle) API so the private browser lease is reused.
  */
 export async function captureSession(name, context, page, opts = {}) {
   const canonicalName = assertStateName(name, 'Session');

@@ -233,12 +233,15 @@ export class TimeoutError extends StealthError {
 }
 
 export class ProxyError extends StealthError {
-  constructor(proxyUrl, cause) {
-    super(`Proxy connection failed: ${safeUrlForDisplay(proxyUrl, 'configured proxy')}`, {
-      code: 7,
-      hint: 'Check proxy URL, credentials, and connectivity. Run: stealth proxy test',
-      cause,
-    });
+  constructor(proxyUrl, cause, opts = {}) {
+    super(
+      opts.message || `Proxy connection failed: ${safeUrlForDisplay(proxyUrl, 'configured proxy')}`,
+      {
+        code: 7,
+        hint: opts.hint || 'Check proxy URL, credentials, and connectivity. Run: stealth proxy test',
+        cause,
+      },
+    );
     this.name = 'ProxyError';
   }
 }
@@ -255,7 +258,7 @@ export class PersistenceError extends StealthError {
   constructor(message, opts = {}) {
     super(message, {
       code: 8,
-      hint: opts.hint || 'Authentication state was not fully saved; keep the browser open and retry',
+      hint: opts.hint || 'Authentication state was not fully saved; fix the reported storage issue before relying on or reusing this state',
       ...opts,
     });
     this.name = 'PersistenceError';

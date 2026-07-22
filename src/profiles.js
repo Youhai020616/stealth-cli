@@ -16,6 +16,7 @@ import { ProfileError } from './errors.js';
 import {
   ensurePrivateDirectory,
   ensurePrivateFile,
+  readPrivateFile,
   writeJsonAtomic,
 } from './utils/json-file.js';
 import { isValidProxyUrl } from './utils/proxy.js';
@@ -309,25 +310,29 @@ export function validateStoredProfile(profile, canonicalName, requestedName = ca
 }
 
 function readProfile(location, requestedName = location.name) {
-  try {
-    ensurePrivateFile(location.filePath);
-  } catch (cause) {
-    if (cause.code === 'ENOENT') throw profileNotFound(location.name);
-    throw new ProfileError(`Profile "${requestedName}" cannot be accessed securely`, {
-      hint: `Fix permissions and path type for: ${location.filePath}`,
-      cause,
-    });
-  }
-
   let contents;
   try {
-    contents = fs.readFileSync(location.filePath, 'utf8');
+    contents = readPrivateFile(location.filePath, { encoding: 'utf8' });
   } catch (cause) {
     if (cause.code === 'ENOENT') throw profileNotFound(location.name);
-    throw new ProfileError(`Profile "${requestedName}" could not be read`, {
-      hint: `Check access permissions for: ${location.filePath}`,
-      cause,
-    });
+    const securityFailure = [
+      'EUNSAFESTATEPATH',
+      'EINSECUREPERMISSIONS',
+      'EINVALIDSTATEOWNER',
+      'ESTATEPATHREPLACED',
+      'ESTATEFILECHANGED',
+    ].includes(cause.code);
+    throw new ProfileError(
+      securityFailure
+        ? `Profile "${requestedName}" cannot be accessed securely`
+        : `Profile "${requestedName}" could not be read`,
+      {
+        hint: securityFailure
+          ? `Fix ownership, permissions, and path type for: ${location.filePath}`
+          : `Check access permissions for: ${location.filePath}`,
+        cause,
+      },
+    );
   }
 
   let profile;

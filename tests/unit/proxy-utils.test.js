@@ -55,7 +55,9 @@ describe('proxy URL utilities', () => {
 
   it('masks valid credentials and never echoes invalid credential-bearing input', () => {
     expect(maskProxyUrl('HTTP://user:secret@proxy.example:8080'))
-      .toBe('http://user:****@proxy.example:8080');
+      .toBe('http://****@proxy.example:8080');
+    expect(maskProxyUrl('http://api-token@proxy.example:8080'))
+      .toBe('http://****@proxy.example:8080');
 
     const invalid = 'HTTP://user:do-not-leak@proxy.example:8080/private';
     const masked = maskProxyUrl(invalid);

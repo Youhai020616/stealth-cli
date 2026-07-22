@@ -566,7 +566,7 @@ function replacementInspectionFailure(target, journalPath, cause) {
   );
 }
 
-function inspectDetachedJournalPath(record) {
+function inspectDetachedJournalPath(record, opts = {}) {
   let currentOpened;
   let currentClaimIsActive = false;
   let failure;
@@ -600,6 +600,7 @@ function inspectDetachedJournalPath(record) {
         record.opened.journalPath,
         cause,
       );
+      if (typeof opts.retainOpened === 'function') opts.retainOpened(currentOpened);
       if (failure) attachStateCleanupFailures(failure, [cleanupEntry(record.target, closeError)]);
       else failure = closeError;
     }
@@ -622,6 +623,27 @@ function createRelease(record) {
   let releasePublished = false;
   let releaseDurable = false;
   let descriptorCleanupComplete = false;
+  const pendingInspectionJournals = [];
+
+  function retainInspectionJournal(opened) {
+    pendingInspectionJournals.push(opened);
+  }
+
+  function finishInspectionCloses() {
+    while (pendingInspectionJournals.length > 0) {
+      const opened = pendingInspectionJournals[0];
+      try {
+        closeOpenedJournal(opened);
+        pendingInspectionJournals.shift();
+      } catch (cause) {
+        throw closeFailure(record.target, opened.journalPath, cause);
+      }
+    }
+  }
+
+  function inspectDetachedPath() {
+    inspectDetachedJournalPath(record, { retainOpened: retainInspectionJournal });
+  }
 
   function finishClose() {
     if (descriptorCleanupComplete) return;
@@ -658,7 +680,7 @@ function createRelease(record) {
     } catch (cause) {
       throw verificationFailure(cause);
     }
-    if (status !== 'same') inspectDetachedJournalPath(record);
+    if (status !== 'same') inspectDetachedPath();
 
     confirmReleaseDurability();
     finishClose();
@@ -695,6 +717,7 @@ function createRelease(record) {
 
     release() {
       if (descriptorCleanupComplete) return;
+      finishInspectionCloses();
       if (releasePublished) {
         finishPublishedRelease();
         return;
@@ -708,7 +731,7 @@ function createRelease(record) {
       }
       if (status !== 'same') {
         writeAuthorized = false;
-        inspectDetachedJournalPath(record);
+        inspectDetachedPath();
         finishClose();
         return;
       }
@@ -750,7 +773,7 @@ function createRelease(record) {
       writeAuthorized = false;
       releasePublished = true;
       releaseDurable = true;
-      finishClose();
+      finishPublishedRelease();
     },
   };
 }
@@ -798,16 +821,35 @@ function acquireLock(target) {
         { hint: manualRemovalHint(journalPath), cause },
       );
     const cleanupFailures = [];
+    const rollbackInspectionJournals = [];
 
     if (opened && claimAppended && !acquired) {
       try {
         if (journalPathStatus(opened) === 'same') {
           appendRecord(target, opened, releaseRecord(token));
+          if (journalPathStatus(opened) !== 'same') {
+            inspectDetachedJournalPath(
+              { target, token, opened },
+              { retainOpened: (current) => rollbackInspectionJournals.push(current) },
+            );
+          }
         }
       } catch (cleanupError) {
         cleanupFailures.push(cleanupEntry(target, releaseFailure(
           target,
           opened.journalPath,
+          cleanupError,
+        )));
+      }
+    }
+
+    for (const currentOpened of rollbackInspectionJournals) {
+      try {
+        closeOpenedJournal(currentOpened);
+      } catch (cleanupError) {
+        cleanupFailures.push(cleanupEntry(target, closeFailure(
+          target,
+          currentOpened.journalPath,
           cleanupError,
         )));
       }

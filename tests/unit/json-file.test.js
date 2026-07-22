@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ensurePrivateDirectory,
   ensurePrivateFile,
+  readPrivateFile,
   writeJsonAtomic,
 } from '../../src/utils/json-file.js';
 
@@ -42,6 +43,27 @@ describe('private state permissions', () => {
 
     expect(fs.statSync(directory).mode & 0o777).toBe(0o700);
     expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
+  });
+
+  posixIt('rejects a wrong-owner file before attempting to harden permissions', () => {
+    const filePath = temporaryFile();
+    fs.writeFileSync(filePath, '{}', { mode: 0o644 });
+    const lstatSync = fs.lstatSync.bind(fs);
+    const chmodSync = vi.spyOn(fs, 'chmodSync');
+    vi.spyOn(fs, 'lstatSync').mockImplementation((target, ...args) => {
+      const stats = lstatSync(target, ...args);
+      if (target !== filePath) return stats;
+      return new Proxy(stats, {
+        get(current, property) {
+          if (property === 'uid') return current.uid + 1;
+          const value = Reflect.get(current, property);
+          return typeof value === 'function' ? value.bind(current) : value;
+        },
+      });
+    });
+
+    expect(() => ensurePrivateFile(filePath)).toThrow('must be owned by uid');
+    expect(chmodSync).not.toHaveBeenCalled();
   });
 
   posixIt('fails closed when an insecure directory cannot be hardened', () => {
@@ -91,6 +113,41 @@ describe('private state permissions', () => {
 
     expect(() => ensurePrivateDirectory(directoryLink)).toThrow('must not be a symbolic link');
     expect(() => ensurePrivateFile(fileLink)).toThrow('must not be a symbolic link');
+  });
+});
+
+describe('readPrivateFile', () => {
+  const posixIt = process.platform === 'win32' ? it.skip : it;
+
+  it('reads through a validated no-follow descriptor', () => {
+    const filePath = temporaryFile();
+    fs.writeFileSync(filePath, '{"version":1}\n', { mode: 0o600 });
+
+    expect(readPrivateFile(filePath, { encoding: 'utf8' })).toBe('{"version":1}\n');
+  });
+
+  posixIt('rejects a pathname replacement that occurs during descriptor reads', () => {
+    const directory = temporaryDirectory();
+    const filePath = path.join(directory, 'state.json');
+    const displacedPath = path.join(directory, 'state.displaced.json');
+    const attackerPath = path.join(directory, 'attacker.json');
+    fs.writeFileSync(filePath, '{"trusted":true}\n', { mode: 0o600 });
+    fs.writeFileSync(attackerPath, '{"proxy":"http://attacker.invalid"}\n', { mode: 0o600 });
+    const readFileSync = fs.readFileSync.bind(fs);
+    let swapped = false;
+
+    vi.spyOn(fs, 'readFileSync').mockImplementation((target, ...args) => {
+      if (typeof target === 'number' && !swapped) {
+        swapped = true;
+        fs.renameSync(filePath, displacedPath);
+        fs.copyFileSync(attackerPath, filePath);
+      }
+      return readFileSync(target, ...args);
+    });
+
+    expect(() => readPrivateFile(filePath, { encoding: 'utf8' }))
+      .toThrow('was replaced while in use');
+    expect(fs.readFileSync(filePath, 'utf8')).toBe('{"proxy":"http://attacker.invalid"}\n');
   });
 });
 

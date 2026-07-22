@@ -48,6 +48,10 @@ describe('proxy-pool', () => {
     expect(list[0].label).toBe('us');
     expect(list[0].region).toBe('US');
     expect(list[1].label).toBe('eu');
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(path.dirname(PROXIES_FILE)).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(PROXIES_FILE).mode & 0o777).toBe(0o600);
+    }
   });
 
   it('should reject duplicate proxy', () => {
@@ -116,7 +120,7 @@ describe('proxy-pool', () => {
   it('should normalize uppercase schemes and mask passwords in listed proxies', () => {
     addProxy('HTTP://user:secret@proxy:8080');
     const list = listProxies();
-    expect(list[0].url).toBe('http://user:****@proxy:8080');
+    expect(list[0].url).toBe('http://****@proxy:8080');
     expect(list[0].url).not.toContain('secret');
   });
 
@@ -137,6 +141,23 @@ describe('proxy-pool', () => {
       proxy: 'invalid proxy',
     });
     expect(result.error).not.toContain('do-not-leak');
+  });
+
+  it('should not expose dependency errors or proxy userinfo when testing fails', async () => {
+    createBrowser.mockRejectedValue(
+      new Error('launch failed password=do-not-leak for http://user:secret@proxy.example:8080'),
+    );
+
+    const result = await testProxy('http://api-token:proxy-secret@proxy.example:8080');
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: 'Proxy connection failed: http://proxy.example:8080',
+      proxy: 'http://****@proxy.example:8080',
+    });
+    expect(JSON.stringify(result)).not.toContain('do-not-leak');
+    expect(JSON.stringify(result)).not.toContain('api-token');
+    expect(JSON.stringify(result)).not.toContain('proxy-secret');
   });
 
   it('should test uppercase credentialed IPv6 proxies with normalized Playwright options', async () => {
@@ -167,7 +188,7 @@ describe('proxy-pool', () => {
     expect(result).toMatchObject({
       ok: true,
       ip: '203.0.113.10',
-      proxy: 'http://user:****@[2001:db8::1]:8080',
+      proxy: 'http://****@[2001:db8::1]:8080',
     });
   });
 });

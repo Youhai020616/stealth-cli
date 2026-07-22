@@ -238,7 +238,7 @@ export async function launchBrowser(opts = {}) {
         handleSignals,
       });
     } catch (cause) {
-      throw new BrowserLaunchError(cause.message, { cause });
+      throw new BrowserLaunchError('Failed to launch browser', { cause });
     }
 
     const contextOptions = {
@@ -333,7 +333,7 @@ export async function launchBrowser(opts = {}) {
   } catch (error) {
     let primaryError = error;
     if (!(error instanceof ProfileError || error instanceof BrowserLaunchError) && browser) {
-      primaryError = new BrowserLaunchError(`Browser initialization failed: ${error.message}`, {
+      primaryError = new BrowserLaunchError('Browser initialization failed', {
         cause: error,
       });
     }
@@ -493,6 +493,14 @@ export async function persistBrowserState(handle) {
 
   const snapshot = await captureBrowserState(handle);
   return writeBrowserStateSnapshot(handle, snapshot);
+}
+
+/**
+ * Persist a live browser handle through its private state lease without
+ * exposing that lease to SDK callers.
+ */
+export async function checkpointBrowserState(handle) {
+  return persistBrowserState(handle);
 }
 
 function getCloseState(handle) {

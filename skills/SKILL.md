@@ -196,7 +196,7 @@ stealth open https://other.com --session my-task
 
 A session linked to a profile automatically restores that profile when only `--session` is supplied. For `open` and `interactive`, an explicit initial URL skips the session's saved URL before navigation. Profile and session names accept only letters, numbers, underscores, and hyphens, use lowercase canonical identities, and reject Windows device basenames such as `CON`, `NUL`, `COM1`, and `LPT1` on every platform. Older versions sanitized unsupported filename characters to underscores; reuse that basename (for example, `work.prod` became `work_prod`). `stealth profile list` shows profile basenames. There is no session-list command, so inspect `$STEALTH_HOME/sessions` (default `~/.stealth/sessions`) for a legacy session filename. Compatible legacy metadata is rewritten on the next successful save, but files are not automatically renamed. If a linked profile is missing or stored state is malformed, startup fails before browser launch instead of silently using another identity.
 
-Named profile and session browser state is single-writer: browser lifetimes and standalone mutations use the same lease protocol. Concurrent reuse fails. Crash-left locks are not auto-removed; verify that no process owns the state before removing the exact lock path printed by the CLI. `STEALTH_HOME` relocates profiles, sessions, and their locks from the default `~/.stealth`; its state paths must not be symlinks. POSIX systems enforce owner-only directory/file modes (`0700`/`0600`); Windows skips POSIX mode-bit enforcement, so use user-only ACLs and avoid shared directories. Config, proxy-pool, and daemon paths still use `~/.stealth` in the current source.
+Named profile and session browser state is single-writer: browser lifetimes and standalone mutations use the same lease protocol. Concurrent reuse fails. Crash-left locks are not auto-removed; verify that no process owns the state before removing the exact lock path printed by the CLI. `STEALTH_HOME` relocates profiles, sessions, and their locks from the default `~/.stealth`; its state paths must not be symlinks. POSIX systems enforce owner-only directory/file modes (`0700`/`0600`), including config and proxy-pool credential storage; Windows skips POSIX mode-bit enforcement, so use user-only ACLs and avoid shared directories. Config, proxy-pool, and daemon paths still use `~/.stealth` in the current source.
 
 ### Proxy pool
 
@@ -242,7 +242,7 @@ stealth interactive --url https://example.com
 
 ## Output format
 
-All commands support `--format` or `-f`:
+Commands that produce page or search data may support `--format` or `-f` (check `stealth <command> --help`):
 - `text` — human-readable (default)
 - `json` — structured JSON
 - `jsonl` — one JSON object per line
@@ -256,7 +256,9 @@ stealth search google "query" -f json | jq '.results[].url'
 stealth extract https://example.com --links -f json | jq '.[].url'
 ```
 
-## Common options (all commands)
+## Common browser-command options
+
+Option availability varies by command; run `stealth <command> --help` for the exact set.
 
 | Option | Description |
 |--------|-------------|

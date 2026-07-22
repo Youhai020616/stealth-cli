@@ -84,7 +84,10 @@ export function isValidProxyUrl(value) {
 export function maskProxyUrl(value) {
   try {
     const parsed = parseProxyUrl(value);
-    if (parsed.password) parsed.password = '****';
+    if (parsed.username || parsed.password) {
+      parsed.username = '****';
+      parsed.password = '';
+    }
     return parsed.toString().replace(/\/$/u, '');
   } catch {
     return INVALID_PROXY_DISPLAY;

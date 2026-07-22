@@ -4,9 +4,9 @@
  * Provides defaults for all commands so you don't have to repeat flags.
  */
 
-import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { readPrivateFile, writeJsonAtomic } from './utils/json-file.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.stealth');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
@@ -39,9 +39,16 @@ export function loadConfig() {
  * Read raw config file
  */
 function readConfigFile() {
+  let contents;
   try {
-    if (!fs.existsSync(CONFIG_FILE)) return {};
-    return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    contents = readPrivateFile(CONFIG_FILE, { encoding: 'utf8' });
+  } catch (error) {
+    if (error.code === 'ENOENT') return {};
+    throw error;
+  }
+
+  try {
+    return JSON.parse(contents);
   } catch {
     return {};
   }
@@ -51,8 +58,7 @@ function readConfigFile() {
  * Write config file
  */
 function writeConfigFile(config) {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  writeJsonAtomic(CONFIG_FILE, config);
 }
 
 /**

@@ -29,7 +29,7 @@ src/
   utils/
     browser-factory.js   — Shared browser bootstrap (getHostOS, createBrowser, TEXT_EXTRACT_SCRIPT)
     close-browser-cli.js — CLI close wrapper that surfaces persistence and cleanup failures
-    json-file.js         — Atomic owner-only writes for profile/session auth state
+    json-file.js         — Descriptor-bound private reads + atomic owner-only JSON writes
     resolve-opts.js      — Merge global config + CLI opts (used by all core commands)
     state-lock.js        — Single-writer profile/session locks held for browser lifetime
     storage-paths.js     — STEALTH_HOME profile/session/lock paths + strict state-name validation
@@ -60,7 +60,7 @@ tests/
 - A session-only launch restores its linked profile; invalid state names, malformed state, or a missing linked profile fail before browser launch
 - SDK `closeBrowser()` is best-effort by default; `{ strict: true }` throws after cleanup. Later calls retry unfinished resource/lease cleanup but never recapture persistence. CLI commands surface close-time persistence failures with a non-zero exit status
 - All browser launch goes through `camoufox-js` `launchOptions()` → `playwright-core` `firefox.launch()`. Never use `chromium.launch()` or `playwright` (non-core)
-- `STEALTH_HOME` overrides profile, session, and lock storage; config, proxy-pool, and daemon paths still use `~/.stealth`. POSIX owner-only modes are not enforceable through mode bits on Windows, so Windows users must protect state with ACLs
+- `STEALTH_HOME` overrides profile, session, and lock storage; config, proxy-pool, and daemon paths still use `~/.stealth`. Profile/session/config/proxy JSON uses owner-only POSIX storage; mode bits are not enforceable on Windows, so Windows users must protect sensitive paths with ACLs
 - Daemon socket: `~/.stealth/daemon.sock`, PID: `~/.stealth/daemon.pid`
 
 ## camoufox-js API (DO NOT GUESS)

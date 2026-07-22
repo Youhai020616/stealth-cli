@@ -413,7 +413,7 @@ describe('session', () => {
     const filePath = path.join(SESSIONS_DIR, `${name}.json`);
     const readFileSync = fs.readFileSync.bind(fs);
     vi.spyOn(fs, 'readFileSync').mockImplementation((target, ...args) => {
-      if (path.resolve(String(target)) === filePath) {
+      if (typeof target === 'number') {
         const error = new Error('permission denied');
         error.code = 'EACCES';
         throw error;

@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { withRetry } from '../../src/retry.js';
+import { describe, it, expect, vi } from 'vitest';
+import { withRetry, navigateWithRetry } from '../../src/retry.js';
+import { log } from '../../src/output.js';
 
 describe('retry', () => {
   it('should return result on first success', async () => {
@@ -60,6 +61,30 @@ describe('retry', () => {
       },
     );
     expect(retryCount).toBe(1);
+  });
+
+  it('should not log raw navigation URLs or dependency error messages while retrying', async () => {
+    const warning = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    vi.spyOn(log, 'dim').mockImplementation(() => {});
+    const page = {
+      goto: vi.fn().mockRejectedValue(
+        new Error('page.goto: Timeout at https://user:password@example.com/callback?token=secret password=hidden'),
+      ),
+      url: vi.fn(),
+    };
+
+    await expect(navigateWithRetry(
+      page,
+      'https://user:password@example.com/callback?token=secret',
+      { maxRetries: 1, baseDelay: 0 },
+    )).rejects.toThrow('password=hidden');
+
+    const output = warning.mock.calls.flat().join(' ');
+    expect(output).toContain('navigate to https://example.com');
+    expect(output).not.toContain('user:password');
+    expect(output).not.toContain('token=secret');
+    expect(output).not.toContain('password=hidden');
+    vi.restoreAllMocks();
   });
 
   it('should support custom shouldRetry function', async () => {

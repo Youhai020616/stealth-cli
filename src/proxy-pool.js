@@ -4,33 +4,36 @@
  * Storage: ~/.stealth/proxies.json
  */
 
-import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { ProxyError } from './errors.js';
+import {
+  ensurePrivateDirectory,
+  readPrivateFile,
+  writeJsonAtomic,
+} from './utils/json-file.js';
 import { maskProxyUrl, parseProxyUrl, toPlaywrightProxy } from './utils/proxy.js';
 
 const STEALTH_DIR = path.join(os.homedir(), '.stealth');
 const PROXIES_FILE = path.join(STEALTH_DIR, 'proxies.json');
 
 function ensureDir() {
-  fs.mkdirSync(STEALTH_DIR, { recursive: true });
+  ensurePrivateDirectory(STEALTH_DIR);
 }
 
 function loadData() {
   ensureDir();
-  if (!fs.existsSync(PROXIES_FILE)) {
-    return { proxies: [], lastRotateIndex: 0 };
+  try {
+    return JSON.parse(readPrivateFile(PROXIES_FILE, { encoding: 'utf8' }));
+  } catch (error) {
+    if (error.code === 'ENOENT') return { proxies: [], lastRotateIndex: 0 };
+    throw error;
   }
-  return JSON.parse(fs.readFileSync(PROXIES_FILE, 'utf-8'));
 }
 
 function saveData(data) {
   ensureDir();
-  // Atomic write: write to temp file then rename (prevents corruption on crash)
-  const tmpPath = PROXIES_FILE + '.tmp';
-  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
-  fs.renameSync(tmpPath, PROXIES_FILE);
+  writeJsonAtomic(PROXIES_FILE, data);
 }
 
 /**
@@ -52,7 +55,10 @@ export function addProxy(proxyUrl, opts = {}) {
 
   // Check for duplicates
   if (data.proxies.some((p) => p.url === proxyUrl)) {
-    throw new Error('Proxy already exists in pool');
+    throw new ProxyError(proxyUrl, new Error('Duplicate proxy'), {
+      message: 'Proxy already exists in pool',
+      hint: 'Remove the existing proxy before adding the same URL again',
+    });
   }
 
   data.proxies.push({
@@ -77,7 +83,12 @@ export function addProxy(proxyUrl, opts = {}) {
 export function removeProxy(proxyUrl) {
   const data = loadData();
   const idx = data.proxies.findIndex((p) => p.url === proxyUrl || p.label === proxyUrl);
-  if (idx === -1) throw new Error('Proxy not found');
+  if (idx === -1) {
+    throw new ProxyError(proxyUrl, new Error('Proxy not found'), {
+      message: 'Proxy not found in pool',
+      hint: 'Run: stealth proxy list',
+    });
+  }
   data.proxies.splice(idx, 1);
   saveData(data);
 }
@@ -207,10 +218,13 @@ export async function testProxy(proxyUrl) {
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
     reportProxy(proxyUrl, false);
+    const publicError = err instanceof ProxyError
+      ? err
+      : new ProxyError(proxyUrl, err);
 
     return {
       ok: false,
-      error: err.message,
+      error: publicError.message,
       latency: Date.now() - start,
       proxy: maskProxyUrl(proxyUrl),
     };

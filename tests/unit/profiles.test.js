@@ -435,7 +435,7 @@ describe('profiles', () => {
     const filePath = path.join(PROFILES_DIR, `${TEST_PROFILE}.json`);
     const readFileSync = fs.readFileSync.bind(fs);
     vi.spyOn(fs, 'readFileSync').mockImplementation((target, ...args) => {
-      if (path.resolve(String(target)) === filePath) {
+      if (typeof target === 'number') {
         const error = new Error('permission denied');
         error.code = 'EACCES';
         throw error;
@@ -459,6 +459,32 @@ describe('profiles', () => {
   });
 
   const symlinkIt = process.platform === 'win32' ? it.skip : it;
+
+  symlinkIt('rejects profile pathname replacement during a descriptor-bound read', () => {
+    createProfile(TEST_PROFILE, { preset: 'us-desktop' });
+    const filePath = path.join(PROFILES_DIR, `${TEST_PROFILE}.json`);
+    const displacedPath = path.join(PROFILES_DIR, `${TEST_PROFILE}.displaced.json`);
+    const attackerProfile = {
+      ...profileFixture(TEST_PROFILE),
+      proxy: 'http://attacker.invalid:8080',
+    };
+    const readFileSync = fs.readFileSync.bind(fs);
+    let swapped = false;
+
+    vi.spyOn(fs, 'readFileSync').mockImplementation((target, ...args) => {
+      if (typeof target === 'number' && !swapped) {
+        swapped = true;
+        fs.renameSync(filePath, displacedPath);
+        fs.writeFileSync(filePath, `${JSON.stringify(attackerProfile)}\n`, { mode: 0o600 });
+      }
+      return readFileSync(target, ...args);
+    });
+
+    expect(() => loadProfile(TEST_PROFILE)).toThrow('cannot be accessed securely');
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8')).proxy)
+      .toBe('http://attacker.invalid:8080');
+  });
+
   symlinkIt('rejects profile-file and STEALTH_HOME symlinks', () => {
     fs.mkdirSync(PROFILES_DIR, { recursive: true, mode: 0o700 });
     const outsideFile = path.join(TEST_STEALTH_HOME, 'outside-profile.json');

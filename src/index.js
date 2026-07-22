@@ -6,6 +6,7 @@
 export {
   launchBrowser,
   closeBrowser,
+  checkpointBrowserState,
   navigate,
   getSnapshot,
   getA11ySnapshot,
@@ -19,6 +20,20 @@ export {
   typeRef,
   hoverRef,
 } from "./browser.js";
+
+// Errors
+export {
+  StealthError,
+  BrowserLaunchError,
+  BrowserCleanupError,
+  NavigationError,
+  ExtractionError,
+  TimeoutError,
+  ProxyError,
+  ProfileError,
+  PersistenceError,
+  BlockedError,
+} from "./errors.js";
 
 // Search
 export { expandMacro, getSupportedEngines } from "./macros.js";

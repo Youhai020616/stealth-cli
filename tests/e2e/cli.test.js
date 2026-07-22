@@ -93,6 +93,45 @@ describe('CLI integration', () => {
     expect(remove.stderr).toContain('not found');
   });
 
+  it('should redact durable credentials from profile show output', () => {
+    const name = '__safe_profile_show__';
+    const proxy = 'HTTP://api-token:proxy-secret@proxy.example:8080';
+    const created = run(['profile', 'create', name, '--preset', 'us-desktop', '--proxy', proxy]);
+    expect(created.exitCode).toBe(0);
+
+    const profilePath = path.join(TEST_STEALTH_HOME, 'profiles', `${name}.json`);
+    const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
+    profile.cookies = [{
+      name: 'sid',
+      value: 'cookie-secret',
+      domain: 'example.com',
+      path: '/',
+    }];
+    fs.writeFileSync(profilePath, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
+
+    const shown = run(['profile', 'show', name]);
+    const displayed = JSON.parse(shown.stdout);
+    expect(shown.exitCode).toBe(0);
+    expect(displayed.proxy).toBe('http://****@proxy.example:8080');
+    expect(displayed.cookieCount).toBe(1);
+    expect(displayed).not.toHaveProperty('cookies');
+    expect(shown.stdout).not.toContain('api-token');
+    expect(shown.stdout).not.toContain('proxy-secret');
+    expect(shown.stdout).not.toContain('cookie-secret');
+  });
+
+  it('should use proxy exit code 7 without echoing invalid credentials', () => {
+    const result = run([
+      'proxy',
+      'add',
+      'HTTP://user:do-not-leak@proxy.example:8080/private',
+    ]);
+
+    expect(result.exitCode).toBe(7);
+    expect(result.stderr).not.toContain('user');
+    expect(result.stderr).not.toContain('do-not-leak');
+  });
+
   it('should catch profile list storage failures with exit code 8', () => {
     const invalidHome = path.join(TEST_STEALTH_HOME, 'not-a-directory');
     fs.writeFileSync(invalidHome, 'not a directory', { mode: 0o600 });
