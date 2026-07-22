@@ -9,7 +9,7 @@ const FIXTURE = path.join(__dirname, '..', 'fixtures', 'cookies.txt');
 describe('cookies', () => {
   it('should parse netscape cookie file', () => {
     const cookies = parseCookieFile(FIXTURE);
-    expect(cookies.length).toBe(4);
+    expect(cookies.length).toBe(5);
   });
 
   it('should parse cookie fields correctly', () => {
@@ -24,7 +24,7 @@ describe('cookies', () => {
 
   it('should filter by domain', () => {
     const cookies = parseCookieFile(FIXTURE, 'example.com');
-    expect(cookies.length).toBe(3); // 3 example.com cookies, skip other.com
+    expect(cookies.length).toBe(4); // 4 example.com cookies, skip other.com
     cookies.forEach((c) => {
       expect(c.domain).toContain('example.com');
     });
@@ -36,6 +36,14 @@ describe('cookies', () => {
     expect(secureCookie).toBeDefined();
     expect(secureCookie.secure).toBe(true);
     expect(secureCookie.path).toBe('/path');
+  });
+
+  it('should preserve Netscape HttpOnly cookies', () => {
+    const cookies = parseCookieFile(FIXTURE);
+    const httpOnlyCookie = cookies.find((cookie) => cookie.name === 'http_only_cookie');
+    expect(httpOnlyCookie).toBeDefined();
+    expect(httpOnlyCookie.httpOnly).toBe(true);
+    expect(httpOnlyCookie.domain).toBe('.example.com');
   });
 
   it('should skip comments and empty lines', () => {
