@@ -54,11 +54,13 @@ tests/
 - `browser.js` detects daemon automatically; headed, stateful, proxied, or `forceDirect` launches always bypass it
 - `open` and direct `interactive` own SIGINT/SIGTERM/SIGHUP handling so state is checkpointed before shutdown
 - Named profile/session browser state is lowercase-canonical and single-writer; browser lifetimes and standalone mutations use the same lease protocol
+- Browser-lifetime leases are held in a module-private `WeakMap` in `browser.js`; never expose them on handles. Validate writes with branded `ownsStateLock(lease, kind, name)`, not a caller-provided `.owns()` method
 - State locks fail closed after crashes and are never auto-removed; users must verify ownership before removing the exact stale lock path reported by the CLI
+- State names reject path-like input and Windows device basenames on every platform. Legacy sanitized metadata is rewritten on the next successful save; profile basenames come from `stealth profile list`, while legacy session basenames must be inspected under `$STEALTH_HOME/sessions` because no session-list CLI command exists
 - A session-only launch restores its linked profile; invalid state names, malformed state, or a missing linked profile fail before browser launch
-- SDK `closeBrowser()` remains best-effort and retryable for incomplete cleanup, while CLI commands surface close-time persistence failures with a non-zero exit status
+- SDK `closeBrowser()` is best-effort by default; `{ strict: true }` throws after cleanup. Later calls retry unfinished resource/lease cleanup but never recapture persistence. CLI commands surface close-time persistence failures with a non-zero exit status
 - All browser launch goes through `camoufox-js` `launchOptions()` → `playwright-core` `firefox.launch()`. Never use `chromium.launch()` or `playwright` (non-core)
-- `STEALTH_HOME` overrides profile, session, and lock storage; config, proxy-pool, and daemon paths still use `~/.stealth`
+- `STEALTH_HOME` overrides profile, session, and lock storage; config, proxy-pool, and daemon paths still use `~/.stealth`. POSIX owner-only modes are not enforceable through mode bits on Windows, so Windows users must protect state with ACLs
 - Daemon socket: `~/.stealth/daemon.sock`, PID: `~/.stealth/daemon.pid`
 
 ## camoufox-js API (DO NOT GUESS)
@@ -86,7 +88,7 @@ const browser = await firefox.launch(options);
 
 Custom error hierarchy in `src/errors.js`. Exit codes:
 - 0=success, 1=general, 2=args, 3=browser launch, 4=navigation, 5=extraction, 6=timeout, 7=proxy, 8=profile/session/persistence error
-- All errors extend `StealthError` with `.code`, `.hint`, `.format()`
+- All errors extend `StealthError` with `.code`, `.hint`, `.format()`, and a redacted `.toJSON()`; raw `.cause`, navigation `.url`, and cleanup internals must remain non-enumerable
 - Use specific error classes: `BrowserLaunchError`, `BrowserCleanupError`, `NavigationError`, `ExtractionError`, `TimeoutError`, `ProxyError`, `ProfileError`, `PersistenceError`, `BlockedError`
 - `handleError(err)` prints message + hint and calls `process.exit(code)`
 

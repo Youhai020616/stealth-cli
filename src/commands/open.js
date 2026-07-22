@@ -14,7 +14,13 @@ import {
   createLaunchSignalGuard,
   DEFAULT_CHECKPOINT_INTERVAL,
 } from '../browser-lifecycle.js';
-import { StealthError, handleError, safeUrlForDisplay } from '../errors.js';
+import {
+  StealthError,
+  attachCleanupFailures,
+  formatCleanupFailures,
+  handleError,
+  safeUrlForDisplay,
+} from '../errors.js';
 import { log } from '../output.js';
 import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
@@ -57,8 +63,10 @@ function reportLifecycleResult(result, hasPersistenceTarget) {
   }
 
   if (result.cleanupErrors?.length > 0) {
-    const targets = result.cleanupErrors.map(({ target }) => target).join(', ');
-    log.warn(`Browser cleanup was incomplete (${targets})`);
+    log.warn(formatCleanupFailures(
+      result.cleanupErrors,
+      'Browser cleanup was incomplete',
+    ));
   } else {
     log.success('Browser closed');
   }
@@ -150,27 +158,32 @@ export async function runOpen(positionalUrl, opts) {
     signalGuard.dispose();
     const pendingSignal = signalGuard.pendingSignal;
 
+    let cleanupFailures = [];
     if (lifecycle) {
       try {
         const result = await lifecycle.requestExit('command-error');
         if (result.reason !== 'command-error') {
           return reportLifecycleResult(result, hasPersistenceTarget);
         }
+        cleanupFailures = result.cleanupErrors || [];
       } catch (cleanupError) {
         if (cleanupError !== error) {
-          log.warn(`Cleanup after failure was incomplete: ${cleanupError.message}`);
+          cleanupFailures = cleanupError.cleanupFailures?.length > 0
+            ? cleanupError.cleanupFailures
+            : [{ target: 'lifecycle', error: cleanupError }];
         }
       }
     } else if (handle) {
-      await closeBrowserForCli(handle, { log });
+      const cleanup = await closeBrowserForCli(handle, { log });
+      cleanupFailures = cleanup.cleanupErrors || [];
     }
 
-    if (pendingSignal && !lifecycle) {
-      throw new StealthError(`Interrupted by ${pendingSignal}`, {
+    const primaryError = pendingSignal && !lifecycle
+      ? new StealthError(`Interrupted by ${pendingSignal}`, {
         code: signalGuard.exitCode,
-      });
-    }
-    throw error;
+      })
+      : error;
+    throw attachCleanupFailures(primaryError, cleanupFailures);
   }
 }
 

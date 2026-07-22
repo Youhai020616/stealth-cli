@@ -11,6 +11,13 @@ import {
 } from './storage-paths.js';
 
 const STATE_KINDS = new Set(['profile', 'session']);
+const LINK_PUBLICATION_FALLBACK_CODES = new Set([
+  'ENOTSUP',
+  'EOPNOTSUPP',
+  'EPERM',
+  'EXDEV',
+]);
+const STATE_LEASE_RECORDS = new WeakMap();
 
 function targetFor(kind, name) {
   if (!STATE_KINDS.has(kind)) {
@@ -67,6 +74,56 @@ function validLockMetadata(metadata, target) {
     && typeof metadata.createdAt === 'string'
     && !Number.isNaN(Date.parse(metadata.createdAt)),
   );
+}
+
+function fileIdentity(stats) {
+  return { device: stats.dev, inode: stats.ino };
+}
+
+function hasFileIdentity(stats, identity) {
+  return stats.dev === identity.device && stats.ino === identity.inode;
+}
+
+function appendCleanupFailure(error, target, cleanupError) {
+  const existing = Array.isArray(error.cleanupFailures) ? error.cleanupFailures : [];
+  error.cleanupFailures = [
+    ...existing,
+    { target: `${target.kind}:${target.name}`, error: cleanupError },
+  ];
+}
+
+function cleanupOwnedPublishedLock(target, filePath, identity) {
+  let current;
+  try {
+    current = fs.lstatSync(filePath, { throwIfNoEntry: false });
+  } catch (cause) {
+    throw new ProfileError(
+      `${target.kind} "${target.name}" partial lock cleanup could not be verified`,
+      { hint: staleLockHint(filePath), cause },
+    );
+  }
+
+  if (!current) return;
+  if (
+    !current.isFile()
+    || current.isSymbolicLink()
+    || !hasFileIdentity(current, identity)
+  ) {
+    throw new ProfileError(
+      `${target.kind} "${target.name}" partial lock is no longer owned by this process`,
+      { hint: staleLockHint(filePath) },
+    );
+  }
+
+  try {
+    fs.unlinkSync(filePath);
+  } catch (cause) {
+    if (cause.code === 'ENOENT') return;
+    throw new ProfileError(
+      `Failed to clean up partial ${target.kind} "${target.name}" lock`,
+      { hint: staleLockHint(filePath), cause },
+    );
+  }
 }
 
 function ensureLocksDir() {
@@ -205,6 +262,67 @@ function createRelease(target, filePath, token) {
   };
 }
 
+function publishLockWithExclusiveOpen(target, filePath, metadata) {
+  let descriptor;
+  let identity;
+
+  try {
+    descriptor = fs.openSync(filePath, 'wx', 0o600);
+    const stats = fs.fstatSync(descriptor);
+    identity = fileIdentity(stats);
+    if (!stats.isFile()) {
+      const error = new Error(`Lock path is not a regular file: ${filePath}`);
+      error.code = 'EUNSAFESTATEPATH';
+      throw error;
+    }
+
+    fs.writeFileSync(descriptor, `${JSON.stringify(metadata)}\n`, 'utf8');
+    fs.fsyncSync(descriptor);
+    const closingDescriptor = descriptor;
+    descriptor = undefined;
+    fs.closeSync(closingDescriptor);
+
+    ensurePrivateFile(filePath);
+    const published = readLock(filePath);
+    if (!validLockMetadata(published, target) || published.token !== metadata.token) {
+      throw new ProfileError(
+        `${target.kind} "${target.name}" lock publication could not be verified`,
+        { hint: staleLockHint(filePath) },
+      );
+    }
+
+    return createRelease(target, filePath, metadata.token);
+  } catch (cause) {
+    // An EEXIST from the exclusive create belongs to another contender. It
+    // must be inspected by the normal conflict path, never cleaned up here.
+    if (cause.code === 'EEXIST' && identity === undefined) throw cause;
+
+    const failure = cause instanceof ProfileError
+      ? cause
+      : new ProfileError(
+        `Failed to acquire ${target.kind} "${target.name}" lock`,
+        { cause },
+      );
+
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch (cleanupError) {
+        appendCleanupFailure(failure, target, cleanupError);
+      }
+    }
+    if (identity !== undefined) {
+      try {
+        cleanupOwnedPublishedLock(target, filePath, identity);
+      } catch (cleanupError) {
+        appendCleanupFailure(failure, target, cleanupError);
+      }
+    }
+
+    throw failure;
+  }
+}
+
 function acquireLock(target) {
   const locksDir = ensureLocksDir();
   const filePath = lockPath(target);
@@ -232,20 +350,35 @@ function acquireLock(target) {
     ensurePrivateFile(tempPath);
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      let publicationError;
       try {
         // A hard link publishes a fully written inode and fails if the lock name
         // already exists, avoiding partially visible lock metadata.
         fs.linkSync(tempPath, filePath);
         return createRelease(target, filePath, token);
       } catch (error) {
-        if (error.code !== 'EEXIST') {
-          throw new ProfileError(
-            `Failed to acquire ${target.kind} "${target.name}" lock`,
-            { cause: error },
-          );
-        }
-        if (inspectExistingLock(target, filePath) === 'retry') continue;
+        publicationError = error;
       }
+
+      if (LINK_PUBLICATION_FALLBACK_CODES.has(publicationError.code)) {
+        try {
+          // Some filesystems cannot publish with hard links. Exclusive creation
+          // makes the final path visible before writing, so contenders fail
+          // closed on incomplete metadata until this owner finishes or cleans up.
+          return publishLockWithExclusiveOpen(target, filePath, metadata);
+        } catch (error) {
+          publicationError = error;
+        }
+      }
+
+      if (publicationError.code !== 'EEXIST') {
+        if (publicationError instanceof ProfileError) throw publicationError;
+        throw new ProfileError(
+          `Failed to acquire ${target.kind} "${target.name}" lock`,
+          { cause: publicationError },
+        );
+      }
+      if (inspectExistingLock(target, filePath) === 'retry') continue;
     }
   } catch (error) {
     if (error instanceof ProfileError) throw error;
@@ -303,7 +436,10 @@ export function acquireStateLocks(opts = {}) {
         });
       }
     }
-    if (cleanupFailures.length > 0) error.cleanupFailures = cleanupFailures;
+    if (cleanupFailures.length > 0) {
+      const existing = Array.isArray(error.cleanupFailures) ? error.cleanupFailures : [];
+      error.cleanupFailures = [...existing, ...cleanupFailures];
+    }
     throw error;
   }
 
@@ -319,20 +455,41 @@ export function acquireStateLocks(opts = {}) {
     if (errors.length > 0) throw errors[0];
   };
 
-  lease.owns = (kind, name) => {
-    if (!STATE_KINDS.has(kind)) return false;
-    let target;
-    try {
-      target = targetFor(kind, name);
-    } catch {
-      return false;
-    }
-    return records.some(({ target: held, lock }) => (
-      lock.isActive() && held.kind === target.kind && held.name === target.name
-    ));
-  };
+  STATE_LEASE_RECORDS.set(lease, records);
+  lease.owns = (kind, name) => ownsStateLock(lease, kind, name);
 
   return lease;
+}
+
+/**
+ * Verify that a value is a genuine module-created lease with active ownership.
+ *
+ * @param {unknown} lease
+ * @param {'profile'|'session'} kind
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function ownsStateLock(lease, kind, name) {
+  if (
+    (typeof lease !== 'function' && (typeof lease !== 'object' || lease === null))
+    || !STATE_KINDS.has(kind)
+  ) {
+    return false;
+  }
+
+  const records = STATE_LEASE_RECORDS.get(lease);
+  if (!records) return false;
+
+  let target;
+  try {
+    target = targetFor(kind, name);
+  } catch {
+    return false;
+  }
+
+  return records.some(({ target: held, lock }) => (
+    lock.isActive() && held.kind === target.kind && held.name === target.name
+  ));
 }
 
 /**
@@ -342,7 +499,7 @@ export function acquireStateLocks(opts = {}) {
  * @template T
  * @param {'profile'|'session'} kind
  * @param {string} name
- * @param {null|undefined|{ owns(kind: string, name: string): boolean }} lease
+ * @param {null|undefined|Function} lease
  * @param {(activeLease: Function) => T} callback
  * @returns {T}
  */
@@ -352,7 +509,7 @@ export function withStateLock(kind, name, lease, callback) {
     throw new TypeError('State lock callback must be a function');
   }
 
-  if (lease && typeof lease.owns === 'function' && lease.owns(target.kind, target.name)) {
+  if (ownsStateLock(lease, target.kind, target.name)) {
     return callback(lease);
   }
 

@@ -34,13 +34,15 @@ import {
   NavigationError,
   PersistenceError,
   ProfileError,
+  attachCleanupFailures,
   safeUrlForDisplay,
 } from "./errors.js";
 import { buildA11yTree, clickByRef, typeByRef, hoverByRef } from "./a11y.js";
-import { acquireStateLocks } from "./utils/state-lock.js";
+import { acquireStateLocks, ownsStateLock } from "./utils/state-lock.js";
 import { assertStateName } from "./utils/storage-paths.js";
 
 const closeStates = new WeakMap();
+const stateLeases = new WeakMap();
 
 function isNonBlankUrl(value) {
   return typeof value === 'string' && value.length > 0 && value !== 'about:blank';
@@ -61,14 +63,10 @@ function configuredStateTargets(meta = {}) {
 
 function requireOwningStateLease(handle) {
   const targets = configuredStateTargets(handle?._meta);
-  const stateLease = handle?._meta?.stateLease;
+  const stateLease = stateLeases.get(handle);
   const unowned = targets.filter(({ kind, name }) => {
     try {
-      return (
-        typeof stateLease !== 'function' ||
-        typeof stateLease.owns !== 'function' ||
-        !stateLease.owns(kind, name)
-      );
+      return !ownsStateLock(stateLease, kind, name);
     } catch {
       return true;
     }
@@ -84,15 +82,20 @@ function requireOwningStateLease(handle) {
   return stateLease;
 }
 
-function attachCleanupFailures(error, cleanupFailures) {
+function attachLaunchCleanupFailures(error, cleanupFailures) {
   if (cleanupFailures.length === 0) return error;
 
   const cleanupError = new BrowserCleanupError('Browser launch rollback was incomplete', {
     cause: cleanupFailures[0].error,
     failures: cleanupFailures,
   });
-  error.cleanupFailures = cleanupFailures;
-  error.cleanupError = cleanupError;
+  attachCleanupFailures(error, cleanupFailures);
+  Object.defineProperty(error, 'cleanupError', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: cleanupError,
+  });
   return error;
 }
 
@@ -161,7 +164,9 @@ export async function launchBrowser(opts = {}) {
   // A linked session carries its profile identity even when --profile is not
   // repeated. Re-read it after locking before trusting any mutable state.
   let sessionMetadata = sessionName ? getSession(sessionName) : null;
-  if (!profileName && sessionMetadata?.profile) profileName = sessionMetadata.profile;
+  if (!profileName && sessionMetadata?.profile) {
+    profileName = assertStateName(sessionMetadata.profile, "Profile");
+  }
 
   const stateLease = acquireStateLocks({
     profile: profileName,
@@ -183,9 +188,12 @@ export async function launchBrowser(opts = {}) {
 
     if (sessionName) {
       sessionMetadata = getSession(sessionName);
-      if (sessionMetadata.profile && sessionMetadata.profile !== profileName) {
+      const linkedProfileName = sessionMetadata.profile
+        ? assertStateName(sessionMetadata.profile, "Profile")
+        : null;
+      if (linkedProfileName && linkedProfileName !== profileName) {
         throw new ProfileError(
-          `Session "${sessionName}" belongs to profile "${sessionMetadata.profile}", not "${profileName}"`,
+          `Session "${sessionName}" belongs to profile "${linkedProfileName}", not "${profileName}"`,
           { hint: 'Use the linked profile or choose a different --session name' },
         );
       }
@@ -292,7 +300,7 @@ export async function launchBrowser(opts = {}) {
       ? pageUrl
       : isNonBlankUrl(sessionInfo?.lastUrl) ? sessionInfo.lastUrl : pageUrl;
 
-    return {
+    const handle = {
       browser,
       context,
       page,
@@ -303,9 +311,10 @@ export async function launchBrowser(opts = {}) {
         proxyUrl: proxyStr,
         sessionInfo,
         lastKnownUrl,
-        stateLease,
       },
     };
+    stateLeases.set(handle, stateLease);
+    return handle;
   } catch (error) {
     let primaryError = error;
     if (!(error instanceof ProfileError || error instanceof BrowserLaunchError) && browser) {
@@ -319,8 +328,9 @@ export async function launchBrowser(opts = {}) {
       context,
       page: null,
       isDaemon: false,
-      _meta: { stateLease },
+      _meta: {},
     };
+    stateLeases.set(rollbackHandle, stateLease);
     let cleanupFailures = [];
     try {
       let cleanup = await closeBrowser(rollbackHandle, { persist: false });
@@ -332,7 +342,7 @@ export async function launchBrowser(opts = {}) {
       cleanupFailures = [{ target: 'rollback', error: cleanupError }];
     }
 
-    throw attachCleanupFailures(primaryError, cleanupFailures);
+    throw attachLaunchCleanupFailures(primaryError, cleanupFailures);
   }
 }
 
@@ -432,7 +442,6 @@ export async function writeBrowserStateSnapshot(handle, snapshot) {
       results.session = {
         name: sessionName,
         cookies: session.cookies.length,
-        lastUrl: session.lastUrl,
       };
     } catch (error) {
       failures.push({ target: 'session', name: sessionName, error });
@@ -481,7 +490,7 @@ function getCloseState(handle) {
       persistenceError: null,
       contextClosed: !handle.context,
       browserClosed: !handle.browser,
-      stateLeaseReleased: typeof handle._meta?.stateLease !== 'function',
+      stateLeaseReleased: !stateLeases.has(handle),
     };
     closeStates.set(handle, state);
   }
@@ -551,7 +560,8 @@ async function performCloseOperation(handle, state, persist) {
     canReleaseStateLease(handle, state)
   ) {
     try {
-      await handle._meta.stateLease();
+      await stateLeases.get(handle)();
+      stateLeases.delete(handle);
       state.stateLeaseReleased = true;
     } catch (error) {
       cleanupErrors.push({ target: 'state-lock', error });
@@ -570,8 +580,9 @@ async function performCloseOperation(handle, state, persist) {
  * calls to retry resources whose cleanup did not complete.
  *
  * Persistence is best-effort by default for SDK compatibility and is attempted
- * at most once. Callers that need a strict guarantee should persist first and
- * then call closeBrowser(handle, { persist: false }).
+ * at most once. Strict mode throws after cleanup when persistence or cleanup is
+ * incomplete. A later call may retry unfinished resource/lease cleanup, but it
+ * does not recapture or retry persistence.
  *
  * @param {object} handle
  * @param {object} [opts]
@@ -601,9 +612,7 @@ export async function closeBrowser(handle, opts = {}) {
 
   const result = await state.inFlight;
   if (strict && result.persistenceError) {
-    if (result.cleanupErrors.length > 0) {
-      result.persistenceError.cleanupFailures = result.cleanupErrors;
-    }
+    attachCleanupFailures(result.persistenceError, result.cleanupErrors);
     throw result.persistenceError;
   }
   if (strict && result.cleanupErrors.length > 0) {

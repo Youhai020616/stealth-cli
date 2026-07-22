@@ -81,12 +81,109 @@ function syncDirectory(directory) {
   if (operationError && !directorySyncIsUnsupported(operationError)) throw operationError;
 }
 
+function fileIdentity(stats) {
+  return { device: stats.dev, inode: stats.ino };
+}
+
+function hasFileIdentity(stats, identity) {
+  return stats.dev === identity.device && stats.ino === identity.inode;
+}
+
+function rollbackPublishedWrite(filePath, previousContents, replacementIdentity, mode) {
+  const directory = path.dirname(filePath);
+  const rollbackPath = path.join(
+    directory,
+    `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.rollback`,
+  );
+  let rollbackDescriptor;
+  let rollbackTempExists = false;
+  let destination = 'replacement';
+
+  try {
+    const current = fs.lstatSync(filePath, { throwIfNoEntry: false });
+    if (
+      current
+      && (
+        !current.isFile()
+        || current.isSymbolicLink()
+        || !hasFileIdentity(current, replacementIdentity)
+      )
+    ) {
+      const error = new Error(
+        `Atomic JSON rollback refused to replace an unowned destination: ${filePath}`,
+      );
+      error.code = 'EROLLBACKOWNERSHIP';
+      throw error;
+    }
+
+    if (previousContents !== null) {
+      rollbackDescriptor = fs.openSync(rollbackPath, 'wx', mode);
+      rollbackTempExists = true;
+      if (!fs.fstatSync(rollbackDescriptor).isFile()) {
+        throw unsafePathError(rollbackPath, 'a regular file');
+      }
+      fs.writeFileSync(rollbackDescriptor, previousContents);
+      fs.fsyncSync(rollbackDescriptor);
+      const closingDescriptor = rollbackDescriptor;
+      rollbackDescriptor = undefined;
+      fs.closeSync(closingDescriptor);
+      ensurePrivateFile(rollbackPath, mode);
+      fs.renameSync(rollbackPath, filePath);
+      rollbackTempExists = false;
+      destination = 'restored';
+      ensurePrivateFile(filePath, mode);
+    } else {
+      if (current) fs.unlinkSync(filePath);
+      destination = 'absent';
+    }
+
+    syncDirectory(directory);
+    return { status: 'succeeded', destination };
+  } catch (error) {
+    if (rollbackDescriptor !== undefined) {
+      try {
+        fs.closeSync(rollbackDescriptor);
+      } catch {}
+    }
+    if (rollbackTempExists) {
+      try {
+        fs.unlinkSync(rollbackPath);
+      } catch {}
+    }
+    return { status: 'failed', destination, error };
+  }
+}
+
+function attachCommitOutcome(error, previousContents, rollback) {
+  const rollbackDetails = {
+    status: rollback.status,
+    destination: rollback.destination,
+  };
+  if (rollback.error) {
+    rollbackDetails.error = {
+      name: rollback.error.name,
+      code: rollback.error.code,
+      message: rollback.error.message,
+    };
+    error.rollbackError = rollback.error;
+  }
+
+  error.commitOutcome = {
+    status: rollback.status === 'succeeded' ? 'rolled-back' : 'uncertain',
+    replacement: 'published',
+    previousDestination: previousContents === null ? 'absent' : 'present',
+    rollback: rollbackDetails,
+  };
+}
+
 /**
  * Atomically write sensitive JSON data with owner-only permissions.
  *
- * The temporary file is created in the destination directory so rename remains
- * atomic on the same filesystem. The previous file is left intact if writing
- * or syncing the replacement fails.
+ * The temporary file is created in the destination directory so publication
+ * remains atomic on the same filesystem. Failures before publication leave the
+ * destination unchanged. Post-publication validation or directory-sync failures
+ * trigger an atomic rollback to the prior bytes (or prior absence) and still
+ * throw; an uncertain rollback is described on error.commitOutcome.
  *
  * @param {string} filePath
  * @param {unknown} value
@@ -104,11 +201,16 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
   ensurePrivateDirectory(directory);
   const existing = fs.lstatSync(filePath, { throwIfNoEntry: false });
   if (existing) ensurePrivateFile(filePath, mode);
+  const previousContents = existing ? fs.readFileSync(filePath) : null;
 
   let fileDescriptor;
+  let replacementIdentity;
+  let published = false;
   try {
     fileDescriptor = fs.openSync(tempPath, 'wx', mode);
-    if (!fs.fstatSync(fileDescriptor).isFile()) {
+    const replacementStats = fs.fstatSync(fileDescriptor);
+    replacementIdentity = fileIdentity(replacementStats);
+    if (!replacementStats.isFile()) {
       throw unsafePathError(tempPath, 'a regular file');
     }
     fs.writeFileSync(fileDescriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
@@ -118,6 +220,7 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
 
     ensurePrivateFile(tempPath, mode);
     fs.renameSync(tempPath, filePath);
+    published = true;
     ensurePrivateFile(filePath, mode);
     syncDirectory(directory);
   } catch (error) {
@@ -125,6 +228,15 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
       try {
         fs.closeSync(fileDescriptor);
       } catch {}
+    }
+    if (published) {
+      const rollback = rollbackPublishedWrite(
+        filePath,
+        previousContents,
+        replacementIdentity,
+        mode,
+      );
+      attachCommitOutcome(error, previousContents, rollback);
     }
     try {
       fs.unlinkSync(tempPath);

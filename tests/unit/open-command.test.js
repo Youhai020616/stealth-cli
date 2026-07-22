@@ -45,6 +45,7 @@ import {
   waitForReady,
 } from '../../src/browser.js';
 import { createBrowserLifecycle } from '../../src/browser-lifecycle.js';
+import { NavigationError, ProfileError } from '../../src/errors.js';
 import { log } from '../../src/output.js';
 import {
   parseCheckpointInterval,
@@ -64,6 +65,7 @@ function lifecycleResult(overrides = {}) {
     persistedAt: new Date().toISOString(),
     usedCheckpointFallback: false,
     cleanup: { cleanupErrors: [] },
+    cleanupErrors: [],
     ...overrides,
   };
 }
@@ -203,6 +205,40 @@ describe('open command', () => {
     expect(requestExit).toHaveBeenCalledWith('command-error');
     expect(result.reason).toBe('signal');
     expect(process.exitCode).toBe(143);
+  });
+
+  it('should attach command-error cleanup failures to the primary error', async () => {
+    const rawUrl = 'https://example.com/callback?token=primary-secret';
+    const primaryError = new NavigationError(rawUrl, new Error(`failed for ${rawUrl}`));
+    const exactHint = 'After confirming no stealth process is using this state, remove this exact lock file: /tmp/locks/abc.lock';
+    const cleanupError = new ProfileError('state lock release failed', {
+      hint: exactHint,
+      cause: new Error('https://example.com/callback?token=cleanup-secret'),
+    });
+    const requestExit = vi.fn().mockResolvedValue(lifecycleResult({
+      reason: 'command-error',
+      cleanupErrors: [{ target: 'state-lock', error: cleanupError }],
+    }));
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'running',
+      start: vi.fn(),
+      wait: vi.fn(),
+      requestExit,
+    });
+    navigate.mockRejectedValue(primaryError);
+
+    await expect(runOpen(rawUrl, {
+      profile: 'work',
+      checkpointInterval: 1000,
+    })).rejects.toBe(primaryError);
+
+    expect(requestExit).toHaveBeenCalledWith('command-error');
+    expect(primaryError.cleanupFailures).toEqual([
+      { target: 'state-lock', error: cleanupError },
+    ]);
+    expect(primaryError.format()).toContain(exactHint);
+    expect(primaryError.format()).not.toContain('primary-secret');
+    expect(primaryError.format()).not.toContain('cleanup-secret');
   });
 
   it('should warn when a hard disconnect uses a durable checkpoint', async () => {

@@ -3,7 +3,11 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { acquireStateLocks, withStateLock } from '../../src/utils/state-lock.js';
+import {
+  acquireStateLocks,
+  ownsStateLock,
+  withStateLock,
+} from '../../src/utils/state-lock.js';
 import { getStateLocksDir } from '../../src/utils/storage-paths.js';
 
 const ORIGINAL_STEALTH_HOME = process.env.STEALTH_HOME;
@@ -49,11 +53,13 @@ describe('state locks', () => {
     expect(lease.owns('profile', 'work')).toBe(true);
     expect(lease.owns('profile', 'WORK')).toBe(true);
     expect(lease.owns('session', 'work')).toBe(false);
+    expect(ownsStateLock(lease, 'profile', 'WORK')).toBe(true);
     expect(() => acquireStateLocks({ profile: 'work' })).toThrow('already in use');
     expect(fs.existsSync(stateLockPath('profile', 'work'))).toBe(true);
 
     lease();
     expect(lease.owns('profile', 'work')).toBe(false);
+    expect(ownsStateLock(lease, 'profile', 'work')).toBe(false);
   });
 
   it('releases earlier deterministic locks when a later target conflicts', () => {
@@ -180,6 +186,64 @@ describe('state locks', () => {
     expect(fs.readdirSync(getStateLocksDir())).toEqual([]);
   });
 
+  it('falls back to exclusive publication and fails closed while metadata is incomplete', () => {
+    const writeFileSync = fs.writeFileSync.bind(fs);
+    let writeCount = 0;
+    let contenderError;
+    vi.spyOn(fs, 'linkSync').mockImplementation(() => {
+      const error = new Error('hard links unsupported');
+      error.code = 'ENOTSUP';
+      throw error;
+    });
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((...args) => {
+      writeCount += 1;
+      if (writeCount === 2) {
+        try {
+          acquireStateLocks({ profile: 'work' });
+        } catch (error) {
+          contenderError = error;
+        }
+      }
+      return writeFileSync(...args);
+    });
+
+    const release = acquireStateLocks({ profile: 'work' });
+    const filePath = stateLockPath('profile', 'work');
+
+    expect(contenderError?.message).toContain('invalid stale lock');
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toMatchObject({
+      kind: 'profile',
+      name: 'work',
+      pid: process.pid,
+    });
+    expect(() => acquireStateLocks({ profile: 'work' })).toThrow('already in use');
+
+    release();
+    expect(fs.existsSync(filePath)).toBe(false);
+  });
+
+  it('owner-verifies and removes a partial exclusive-publication lock after write failure', () => {
+    const writeFileSync = fs.writeFileSync.bind(fs);
+    let writeCount = 0;
+    vi.spyOn(fs, 'linkSync').mockImplementation(() => {
+      const error = new Error('cross-device link');
+      error.code = 'EXDEV';
+      throw error;
+    });
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((...args) => {
+      writeCount += 1;
+      if (writeCount === 2) {
+        const error = new Error('disk full');
+        error.code = 'ENOSPC';
+        throw error;
+      }
+      return writeFileSync(...args);
+    });
+
+    expect(() => acquireStateLocks({ session: 'login' })).toThrow('Failed to acquire');
+    expect(fs.readdirSync(getStateLocksDir())).toEqual([]);
+  });
+
   it('keeps release and ownership retryable after a transient unlink failure', () => {
     const release = acquireStateLocks({ profile: 'work' });
     const filePath = stateLockPath('profile', 'work');
@@ -211,6 +275,26 @@ describe('state locks', () => {
 
     fs.unlinkSync(filePath);
     expect(() => release()).not.toThrow();
+  });
+
+  it('does not trust forged lease predicates', () => {
+    const owner = acquireStateLocks({ profile: 'work' });
+    const fakeLease = { owns: () => true };
+
+    try {
+      expect(ownsStateLock(fakeLease, 'profile', 'work')).toBe(false);
+      expect(() => withStateLock('profile', 'work', fakeLease, () => 'forged'))
+        .toThrow('already in use');
+    } finally {
+      owner();
+    }
+
+    const result = withStateLock('profile', 'work', fakeLease, (activeLease) => {
+      expect(activeLease).not.toBe(fakeLease);
+      expect(ownsStateLock(activeLease, 'profile', 'work')).toBe(true);
+      return 'real-lock';
+    });
+    expect(result).toBe('real-lock');
   });
 
   it('reuses an owning lease and releases short-lived sync and async leases', async () => {
@@ -246,9 +330,11 @@ describe('state locks', () => {
     expect(fs.readFileSync(outside, 'utf8')).toBe('outside');
   });
 
-  it('rejects unsafe profile and session names before touching a lock path', () => {
+  it('rejects unsafe and Windows-reserved names before touching a lock path', () => {
     expect(() => acquireStateLocks({ profile: '../work' })).toThrow('only letters');
     expect(() => acquireStateLocks({ session: 'login.json' })).toThrow('only letters');
+    expect(() => acquireStateLocks({ profile: 'CON' })).toThrow('reserved Windows');
+    expect(() => acquireStateLocks({ session: 'lPt9' })).toThrow('reserved Windows');
     expect(fs.existsSync(getStateLocksDir())).toBe(false);
   });
 });

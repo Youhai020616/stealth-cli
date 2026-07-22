@@ -255,9 +255,9 @@ stealth open https://other.com --session my-task
 
 When `--profile` and `--session` are combined, the profile is the canonical cookie source and the session restores URL/history metadata. A session already linked to a different profile is rejected instead of merging two identities. When only `--session` is supplied, a linked profile is restored automatically. For `open` and `interactive`, an explicit initial URL takes precedence: stealth-cli skips the saved session URL before navigating to the requested URL.
 
-> **Behavior/security change:** Profile and session names may contain only ASCII letters, numbers, underscores, and hyphens (`[A-Za-z0-9_-]+`) and are stored as lowercase canonical names. Existing mixed-case filenames are resolved case-insensitively; if an older release sanitized a name such as `work.prod`, use the basename shown by `stealth profile list` or `stealth session list` (for example, `work_prod`). If a session links to a profile that no longer exists, startup fails before the browser launches instead of silently falling back to a different identity.
+> **Behavior/security change:** Profile and session names may contain only ASCII letters, numbers, underscores, and hyphens (`[A-Za-z0-9_-]+`) and use lowercase canonical identities. Windows device basenames such as `CON`, `NUL`, `COM1`, and `LPT1` are rejected on every platform. Existing mixed-case filenames are resolved case-insensitively. Older releases replaced unsupported characters with underscores in the filename while retaining the original name in JSON; for state previously requested as `work.prod`, reuse the sanitized basename `work_prod`. `stealth profile list` shows reusable profile basenames. There is no session-list CLI command, so inspect the filenames in `$STEALTH_HOME/sessions` (default `~/.stealth/sessions`) when migrating an older session. Compatible legacy metadata is canonicalized and rewritten on the next successful state save; files are not renamed automatically. If a session links to a profile that no longer exists, startup fails before the browser launches instead of silently falling back to a different identity.
 
-Named profile and session browser state is single-writer. Browser lifetimes and standalone create/save/delete operations all participate in the same lock protocol, so concurrent mutation fails instead of mixing identities. Lock files are never removed automatically after a crash: when the recorded owner is no longer running, stealth-cli prints the exact lock path and requires explicit removal after you confirm no process still owns that state. Profile and session JSON files contain authentication material; writes are atomic, directories use owner-only permissions (`0700`), and files use `0600` on supported POSIX platforms.
+Named profile and session browser state is single-writer. Browser lifetimes and standalone create/save/delete operations all participate in the same lock protocol, so concurrent mutation fails instead of mixing identities. Lock files are never removed automatically after a crash: when the recorded owner is no longer running, stealth-cli prints the exact lock path and requires explicit removal after you confirm no process still owns that state. Profile and session JSON files contain authentication material; writes are atomic. On POSIX platforms, directories and files are enforced to owner-only modes (`0700` and `0600`). Windows does not provide equivalent POSIX mode-bit enforcement, so protect `STEALTH_HOME` with user-only Windows ACLs and do not place it in a shared directory.
 
 By default, profiles, sessions, and their locks live under `~/.stealth`. Set `STEALTH_HOME` to relocate those paths together. The configured state root and child paths must not be symlinks. Configuration (`config.json`), proxy-pool (`proxies.json`), and daemon socket/PID paths remain under `~/.stealth` in the current source. A hard browser crash can only preserve state captured by the most recent checkpoint; `open` defaults to a one-second interval.
 
@@ -361,10 +361,18 @@ Use stealth-cli programmatically in your Node.js applications. The `work` profil
 import { launchBrowser, closeBrowser, navigate, getTextContent } from 'stealth-cli';
 
 const handle = await launchBrowser({ profile: 'work', humanize: true });
-await navigate(handle, 'https://example.com');
-const text = await getTextContent(handle);
-await closeBrowser(handle);
+try {
+  await navigate(handle, 'https://example.com');
+  const text = await getTextContent(handle);
+  console.log(text);
+} finally {
+  await closeBrowser(handle, { strict: true });
+}
 ```
+
+`closeBrowser(handle)` is best-effort by default: it attempts persistence and cleanup, then returns `{ persistence, persistenceError, cleanupErrors }` instead of throwing for those failures. Inspect both error fields if you use the default mode. With `{ strict: true }`, cleanup is still attempted, then a `PersistenceError` or `BrowserCleanupError` is thrown when work remains incomplete. Persistence is captured at most once; calling `closeBrowser(handle)` again retries only unfinished context, browser, or state-lock cleanup. Retry the same handle before reusing its named profile/session.
+
+A successful `result.persistence.snapshot` can contain cookie values and the raw last URL, and error objects retain non-enumerable diagnostic fields such as `.cause` or `.url`. Do not log, serialize, or return browser handles or raw close results across trust boundaries. Store `STEALTH_HOME` as sensitive authentication state. Error `toJSON()` output is redacted for routine logging, but the in-memory objects must still be treated as sensitive.
 
 ---
 

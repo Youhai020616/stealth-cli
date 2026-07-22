@@ -24,6 +24,7 @@ import {
   getProfilesDir,
   getStealthHome,
   listStateFilePaths,
+  normalizeStoredStateName,
   resolveStateFilePath,
 } from './utils/storage-paths.js';
 
@@ -99,6 +100,8 @@ const VIEWPORTS = [
   { width: 1280, height: 800 },
 ];
 
+const PROFILE_METADATA_MIGRATIONS = new WeakSet();
+
 const LOCALES = [
   { locale: 'en-US', tz: 'America/New_York', geo: { latitude: 40.7128, longitude: -74.006 } },
   { locale: 'en-US', tz: 'America/Los_Angeles', geo: { latitude: 34.0522, longitude: -118.2437 } },
@@ -166,7 +169,7 @@ function normalizeProfile(profile, canonicalName, requestedName = canonicalName)
   }
   if (profile.name !== undefined && profile.name !== null) {
     try {
-      assertStateName(profile.name, 'Profile');
+      normalizeStoredStateName(profile.name, 'Profile', canonicalName);
     } catch (cause) {
       throw invalidProfile(requestedName, cause);
     }
@@ -209,13 +212,16 @@ function readProfile(location, requestedName = location.name) {
     });
   }
 
-  return normalizeProfile(profile, location.name, requestedName);
+  const normalized = normalizeProfile(profile, location.name, requestedName);
+  if (profile.name !== normalized.name) PROFILE_METADATA_MIGRATIONS.add(normalized);
+  return normalized;
 }
 
 function writeProfile(location, profile, requestedName = location.name) {
   const normalized = normalizeProfile(profile, location.name, requestedName);
   try {
     writeJsonAtomic(location.filePath, normalized);
+    PROFILE_METADATA_MIGRATIONS.delete(profile);
   } catch (cause) {
     if (cause instanceof ProfileError) throw cause;
     throw new ProfileError(`Failed to save profile "${location.name}"`, {
@@ -364,10 +370,13 @@ export function saveProfileCookies(name, cookies, opts = {}) {
     if (!location.exists) throw profileNotFound(canonicalName);
     const profile = readProfile(location, canonicalName);
     const changed = JSON.stringify(profile.cookies || []) !== JSON.stringify(cookies);
+    const needsMetadataMigration = PROFILE_METADATA_MIGRATIONS.has(profile);
 
     if (changed) {
       profile.cookies = cookies;
       profile.lastUsed = new Date().toISOString();
+    }
+    if (changed || needsMetadataMigration) {
       writeProfile(location, profile, canonicalName);
     }
 

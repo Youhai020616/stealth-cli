@@ -23,6 +23,7 @@ function run(args, opts = {}) {
         ...process.env,
         NODE_NO_WARNINGS: '1',
         STEALTH_HOME: TEST_STEALTH_HOME,
+        ...opts.env,
       },
     });
     return { stdout: result, exitCode: 0 };
@@ -77,6 +78,49 @@ describe('CLI integration', () => {
     const { stdout } = run(['profile', 'presets']);
     expect(stdout).toContain('us-desktop');
     expect(stdout).toContain('jp-desktop');
+  });
+
+  it('should use exit code 8 for profile create/show/delete failures', () => {
+    const create = run(['profile', 'create', 'CON']);
+    const show = run(['profile', 'show', '__missing_profile_for_show__']);
+    const remove = run(['profile', 'delete', '__missing_profile_for_delete__']);
+
+    expect(create.exitCode).toBe(8);
+    expect(create.stderr).toContain('reserved Windows device basename');
+    expect(show.exitCode).toBe(8);
+    expect(show.stderr).toContain('not found');
+    expect(remove.exitCode).toBe(8);
+    expect(remove.stderr).toContain('not found');
+  });
+
+  it('should catch profile list storage failures with exit code 8', () => {
+    const invalidHome = path.join(TEST_STEALTH_HOME, 'not-a-directory');
+    fs.writeFileSync(invalidHome, 'not a directory', { mode: 0o600 });
+
+    const { stderr, exitCode } = run(['profile', 'list'], {
+      env: { STEALTH_HOME: invalidHome },
+    });
+
+    expect(exitCode).toBe(8);
+    expect(stderr).toContain('profile storage');
+  });
+
+  it('should display actual per-profile error labels', () => {
+    const labelHome = path.join(TEST_STEALTH_HOME, 'profile-labels');
+    const profilesDir = path.join(labelHome, 'profiles');
+    fs.mkdirSync(profilesDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(profilesDir, 'broken.json'), '{not json}\n', { mode: 0o600 });
+    fs.mkdirSync(path.join(profilesDir, 'unsafe.json'), { mode: 0o700 });
+
+    const { stdout, exitCode } = run(['profile', 'list'], {
+      env: { STEALTH_HOME: labelHome },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain('broken');
+    expect(stdout).toContain('corrupted');
+    expect(stdout).toContain('unsafe');
+    expect(stdout).toContain('unreadable');
   });
 
   it('should show config list', () => {

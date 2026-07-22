@@ -33,7 +33,13 @@ import {
 } from "../humanize.js";
 import { log } from "../output.js";
 import { resolveOpts } from "../utils/resolve-opts.js";
-import { StealthError, handleError } from "../errors.js";
+import {
+  StealthError,
+  attachCleanupFailures,
+  formatCleanupFailures,
+  handleError,
+} from "../errors.js";
+import { closeBrowserForCli } from "../utils/close-browser-cli.js";
 
 function describeUrl(value) {
   try {
@@ -104,8 +110,10 @@ export function registerInteractive(program) {
         }
         if (result.cleanupErrors?.length > 0) {
           cleanupIncomplete = true;
-          const targets = result.cleanupErrors.map(({ target }) => target).join(", ");
-          log.warn(`Browser cleanup was incomplete (${targets})`);
+          log.warn(formatCleanupFailures(
+            result.cleanupErrors,
+            "Browser cleanup was incomplete",
+          ));
         }
         if (result.exitCode) process.exitCode = result.exitCode;
       };
@@ -479,6 +487,7 @@ export function registerInteractive(program) {
         signalGuard.dispose();
         if (rl) rl.close();
 
+        let cleanupFailures = [];
         if (lifecycle) {
           try {
             const result = await lifecycle.requestExit("command-error");
@@ -486,20 +495,26 @@ export function registerInteractive(program) {
               applyLifecycleResult(result);
               return;
             }
+            cleanupFailures = result.cleanupErrors || [];
           } catch (lifecycleError) {
-            err = lifecycleError;
+            if (lifecycleError !== err) {
+              cleanupFailures = lifecycleError.cleanupFailures?.length > 0
+                ? lifecycleError.cleanupFailures
+                : [{ target: "lifecycle", error: lifecycleError }];
+            }
           }
         } else if (handle) {
-          const cleanup = await closeBrowser(handle);
-          if (cleanup.cleanupErrors.length > 0) {
-            const targets = cleanup.cleanupErrors.map(({ target }) => target).join(", ");
-            log.warn(`Browser cleanup after launch failure was incomplete (${targets})`);
-          }
+          const cleanup = await closeBrowserForCli(handle, { log });
+          cleanupFailures = cleanup.cleanupErrors || [];
         }
+        attachCleanupFailures(err, cleanupFailures);
         const handledError = signalGuard.pendingSignal && !lifecycle
-          ? new StealthError(`Interrupted by ${signalGuard.pendingSignal}`, {
-            code: signalGuard.exitCode,
-          })
+          ? attachCleanupFailures(
+            new StealthError(`Interrupted by ${signalGuard.pendingSignal}`, {
+              code: signalGuard.exitCode,
+            }),
+            cleanupFailures,
+          )
           : err;
         process.exitCode = handleError(handledError, { log, exit: false });
       }

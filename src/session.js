@@ -23,8 +23,11 @@ import {
   getSessionsDir,
   getStealthHome,
   listStateFilePaths,
+  normalizeStoredStateName,
   resolveStateFilePath,
 } from './utils/storage-paths.js';
+
+const SESSION_METADATA_MIGRATIONS = new WeakSet();
 
 function ensureDir() {
   const root = getStealthHome();
@@ -93,7 +96,7 @@ function normalizeSession(session, canonicalName, requestedName = canonicalName)
   if (session.name !== null) {
     if (typeof session.name !== 'string') throw invalidSession(requestedName);
     try {
-      assertStateName(session.name, 'Session');
+      normalizeStoredStateName(session.name, 'Session', canonicalName);
     } catch (cause) {
       throw invalidSession(requestedName, cause);
     }
@@ -103,7 +106,7 @@ function normalizeSession(session, canonicalName, requestedName = canonicalName)
   if (session.profile !== null) {
     if (typeof session.profile !== 'string') throw invalidSession(requestedName);
     try {
-      profile = assertStateName(session.profile, 'Profile');
+      profile = normalizeStoredStateName(session.profile, 'Profile');
     } catch (cause) {
       throw invalidSession(requestedName, cause);
     }
@@ -151,7 +154,11 @@ function readSession(location, requestedName = location.name) {
     });
   }
 
-  return normalizeSession(session, location.name, requestedName);
+  const normalized = normalizeSession(session, location.name, requestedName);
+  if (session.name !== normalized.name || session.profile !== normalized.profile) {
+    SESSION_METADATA_MIGRATIONS.add(normalized);
+  }
+  return normalized;
 }
 
 function writeSession(location, session, requestedName = location.name) {
@@ -161,6 +168,7 @@ function writeSession(location, session, requestedName = location.name) {
   };
   try {
     writeJsonAtomic(location.filePath, normalized);
+    SESSION_METADATA_MIGRATIONS.delete(session);
   } catch (cause) {
     if (cause instanceof ProfileError) throw cause;
     throw new ProfileError(`Failed to save session "${location.name}"`, {
@@ -232,6 +240,7 @@ export function saveSessionSnapshot(name, snapshot, opts = {}) {
       : newSession(canonicalName);
     if (!session) session = newSession(canonicalName);
 
+    const needsMetadataMigration = SESSION_METADATA_MIGRATIONS.has(session);
     const before = JSON.stringify({
       cookies: session.cookies,
       history: session.history,
@@ -270,7 +279,7 @@ export function saveSessionSnapshot(name, snapshot, opts = {}) {
       profile: session.profile,
     });
 
-    if (!location.exists || before !== after) {
+    if (!location.exists || before !== after || needsMetadataMigration) {
       session = writeSession(location, session, canonicalName);
     }
     return session;

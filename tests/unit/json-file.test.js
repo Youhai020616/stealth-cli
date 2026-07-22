@@ -131,7 +131,42 @@ describe('writeJsonAtomic', () => {
     expect(fs.lstatSync(linkPath).isSymbolicLink()).toBe(true);
   });
 
-  it('propagates directory fsync data-integrity failures', () => {
+  it('restores an existing destination after a directory fsync failure', () => {
+    const filePath = temporaryFile();
+    writeJsonAtomic(filePath, { version: 1 });
+    const fsyncSync = fs.fsyncSync.bind(fs);
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
+      if (fs.fstatSync(descriptor).isDirectory()) {
+        const error = new Error('I/O failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return fsyncSync(descriptor);
+    });
+
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 2 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.message).toContain('I/O failure');
+    expect(failure?.commitOutcome).toEqual(expect.objectContaining({
+      status: 'uncertain',
+      replacement: 'published',
+      previousDestination: 'present',
+      rollback: expect.objectContaining({
+        status: 'failed',
+        destination: 'restored',
+        error: expect.objectContaining({ code: 'EIO' }),
+      }),
+    }));
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 1 });
+    expect(fs.readdirSync(path.dirname(filePath))).toEqual(['state.json']);
+  });
+
+  it('restores a new destination to absence after a directory fsync failure', () => {
     const filePath = temporaryFile();
     const fsyncSync = fs.fsyncSync.bind(fs);
     vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
@@ -143,7 +178,68 @@ describe('writeJsonAtomic', () => {
       return fsyncSync(descriptor);
     });
 
-    expect(() => writeJsonAtomic(filePath, { version: 1 })).toThrow('I/O failure');
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 1 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.message).toContain('I/O failure');
+    expect(failure?.commitOutcome).toEqual(expect.objectContaining({
+      status: 'uncertain',
+      replacement: 'published',
+      previousDestination: 'absent',
+      rollback: expect.objectContaining({
+        status: 'failed',
+        destination: 'absent',
+        error: expect.objectContaining({ code: 'EIO' }),
+      }),
+    }));
+    expect(fs.existsSync(filePath)).toBe(false);
+    expect(fs.readdirSync(path.dirname(filePath))).toEqual([]);
+  });
+
+  it('restores prior contents after post-rename validation fails', () => {
+    const filePath = temporaryFile();
+    writeJsonAtomic(filePath, { version: 1 });
+    const lstatSync = fs.lstatSync.bind(fs);
+    const renameSync = fs.renameSync.bind(fs);
+    let replacementPublished = false;
+    let validationFailed = false;
+    vi.spyOn(fs, 'renameSync').mockImplementation((source, destination) => {
+      const result = renameSync(source, destination);
+      if (destination === filePath && String(source).endsWith('.tmp')) {
+        replacementPublished = true;
+      }
+      return result;
+    });
+    vi.spyOn(fs, 'lstatSync').mockImplementation((target, ...args) => {
+      if (target === filePath && replacementPublished && !validationFailed) {
+        validationFailed = true;
+        const error = new Error('post-rename validation failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return lstatSync(target, ...args);
+    });
+
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 2 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.message).toContain('post-rename validation failure');
+    expect(failure?.commitOutcome).toEqual(expect.objectContaining({
+      status: 'rolled-back',
+      rollback: expect.objectContaining({
+        status: 'succeeded',
+        destination: 'restored',
+      }),
+    }));
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 1 });
   });
 
   it('ignores only an unsupported directory fsync result', () => {

@@ -4,12 +4,28 @@ import path from 'path';
 import { ProfileError } from '../errors.js';
 
 const STATE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+const WINDOWS_RESERVED_BASENAME_PATTERN = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+const PATH_LIKE_STORED_NAME_PATTERN = /[\\/]|^[a-zA-Z]:|[\u0000-\u001f\u007f]/;
 const JSON_SUFFIX = '.json';
+
+function isPortableStateName(name) {
+  return STATE_NAME_PATTERN.test(name) && !WINDOWS_RESERVED_BASENAME_PATTERN.test(name);
+}
 
 function legacySanitizedName(name) {
   if (typeof name !== 'string') return null;
   const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
-  return STATE_NAME_PATTERN.test(sanitized) ? sanitized : null;
+  return isPortableStateName(sanitized) ? sanitized : null;
+}
+
+function storedNameIsPathLike(name) {
+  return (
+    name === '.'
+    || name === '..'
+    || PATH_LIKE_STORED_NAME_PATTERN.test(name)
+    || path.posix.isAbsolute(name)
+    || path.win32.isAbsolute(name)
+  );
 }
 
 export function getStealthHome() {
@@ -65,7 +81,52 @@ export function assertStateName(name, kind) {
       },
     );
   }
+
+  if (WINDOWS_RESERVED_BASENAME_PATTERN.test(name)) {
+    throw new ProfileError(
+      `${kind} name "${name}" is a reserved Windows device basename and is not portable`,
+      { hint: 'Choose a different profile or session name' },
+    );
+  }
+
   return name.toLowerCase();
+}
+
+/**
+ * Normalize metadata written by current or legacy state serializers.
+ *
+ * Legacy versions sanitized only the filename while retaining the requested
+ * name in JSON. A legacy value is accepted only when it is not path-like and
+ * its historical sanitized form exactly matches the resolved file basename.
+ * When expectedName is omitted (for a session's profile link), the sanitized
+ * basename becomes the canonical linked-state name.
+ */
+export function normalizeStoredStateName(storedName, kind, expectedName) {
+  if (
+    typeof storedName !== 'string'
+    || storedName.length === 0
+    || storedNameIsPathLike(storedName)
+  ) {
+    throw new ProfileError(`${kind} stored name is unsafe or path-like`);
+  }
+
+  const normalized = STATE_NAME_PATTERN.test(storedName)
+    ? assertStateName(storedName, kind)
+    : legacySanitizedName(storedName);
+  if (!normalized) {
+    throw new ProfileError(`${kind} stored name cannot be mapped to a portable basename`);
+  }
+
+  if (expectedName !== undefined) {
+    const expected = assertStateName(expectedName, kind);
+    if (normalized !== expected) {
+      throw new ProfileError(
+        `${kind} stored name "${storedName}" does not match resolved basename "${expected}"`,
+      );
+    }
+  }
+
+  return normalized;
 }
 
 function canonicalNameFromFile(fileName) {
@@ -73,7 +134,7 @@ function canonicalNameFromFile(fileName) {
     return null;
   }
   const basename = fileName.slice(0, -JSON_SUFFIX.length);
-  return STATE_NAME_PATTERN.test(basename) ? basename.toLowerCase() : null;
+  return isPortableStateName(basename) ? basename.toLowerCase() : null;
 }
 
 function scanStateFiles(directory) {

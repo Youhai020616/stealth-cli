@@ -5,6 +5,7 @@ vi.mock('../../src/browser.js', () => ({
 }));
 
 import { closeBrowser } from '../../src/browser.js';
+import { ProfileError } from '../../src/errors.js';
 import { closeBrowserForCli } from '../../src/utils/close-browser-cli.js';
 
 const ORIGINAL_EXIT_CODE = process.exitCode;
@@ -48,19 +49,33 @@ describe('closeBrowserForCli', () => {
     await closeBrowserForCli({ isDaemon: false }, { log: logger });
 
     expect(process.exitCode).toBe(1);
-    expect(logger.warn).toHaveBeenCalledWith('Browser cleanup was incomplete (browser)');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(
+      'Browser cleanup was incomplete (browser)',
+    ));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(
+      'Ensure the browser process has exited',
+    ));
   });
 
-  it('keeps the persistence exit code when persistence and cleanup both fail', async () => {
+  it('keeps the persistence exit code and reports an exact state-lock hint', async () => {
+    const exactHint = 'After confirming no stealth process is using this state, remove this exact lock file: /tmp/locks/abc.lock';
     closeBrowser.mockResolvedValue({
       persistence: null,
       persistenceError: Object.assign(new Error('disk full'), { code: 8 }),
-      cleanupErrors: [{ target: 'state-lock', error: new Error('busy') }],
+      cleanupErrors: [{
+        target: 'state-lock',
+        error: new ProfileError('lock release failed', {
+          hint: exactHint,
+          cause: new Error('raw cleanup cause'),
+        }),
+      }],
     });
 
     await closeBrowserForCli({ isDaemon: false }, { log: logger });
 
     expect(process.exitCode).toBe(8);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(exactHint));
+    expect(logger.warn.mock.calls.flat().join('\n')).not.toContain('raw cleanup cause');
   });
 
   it('does not overwrite an earlier command failure', async () => {

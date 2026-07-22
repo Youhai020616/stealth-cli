@@ -9,6 +9,7 @@ import {
   saveProfile, touchProfile,
 } from '../../src/profiles.js';
 import { acquireStateLocks } from '../../src/utils/state-lock.js';
+import { normalizeStoredStateName } from '../../src/utils/storage-paths.js';
 
 const TEST_PROFILE = '__vitest_test_profile__';
 const ORIGINAL_STEALTH_HOME = process.env.STEALTH_HOME;
@@ -53,6 +54,14 @@ function writeProfileFixture(fileName, profile) {
     `${JSON.stringify(profile)}\n`,
     { mode: 0o600 },
   );
+}
+
+function writeMainSerializedProfile(name) {
+  const legacyBasename = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const filePath = path.join(PROFILES_DIR, `${legacyBasename}.json`);
+  fs.mkdirSync(PROFILES_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filePath, JSON.stringify(profileFixture(name), null, 2), { mode: 0o600 });
+  return filePath;
 }
 
 function supportsCaseSensitiveNames(directory) {
@@ -123,6 +132,15 @@ describe('profiles', () => {
     expect(error?.hint).toContain('sanitized basename "old_profile"');
     expect(() => createProfile('../outside', { random: true })).toThrow('only letters');
     expect(() => loadProfile('work.json')).toThrow('only letters');
+    expect(() => createProfile('CON', { random: true })).toThrow('reserved Windows');
+    expect(() => loadProfile('com9')).toThrow('reserved Windows');
+
+    expect(normalizeStoredStateName('work.prod', 'Profile', 'work_prod'))
+      .toBe('work_prod');
+    expect(() => normalizeStoredStateName('../work', 'Profile', 'work'))
+      .toThrow('path-like');
+    expect(() => normalizeStoredStateName('other.prod', 'Profile', 'work_prod'))
+      .toThrow('does not match');
   });
 
   it('canonicalizes case aliases to one profile file and identity', () => {
@@ -142,6 +160,17 @@ describe('profiles', () => {
     expect(listProfiles()).toContainEqual(expect.objectContaining({ name: 'legacywork' }));
   });
 
+  it('migrates the exact profile metadata shape serialized by main\'s old sanitizer', () => {
+    const filePath = writeMainSerializedProfile('work.prod');
+
+    const loaded = loadProfile('work_prod');
+    expect(loaded.name).toBe('work_prod');
+
+    // An unchanged cookie save is still the next save and must canonicalize metadata.
+    expect(saveProfileCookies('work_prod', [])).toBe(0);
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8')).name).toBe('work_prod');
+  });
+
   it('detects case-insensitive filename collisions on case-sensitive filesystems', () => {
     if (!supportsCaseSensitiveNames(PROFILES_DIR)) return;
     writeProfileFixture('Work.json', profileFixture('Work'));
@@ -151,12 +180,14 @@ describe('profiles', () => {
     expect(() => listProfiles()).toThrow('filename collisions');
   });
 
-  it('uses the canonical filename basename instead of unsafe embedded names when listing', () => {
-    writeProfileFixture('ListedProfile.json', profileFixture('OtherProfile'));
+  it('uses canonical basenames and rejects mismatched or path-like embedded names', () => {
+    writeProfileFixture('ListedProfile.json', profileFixture('ListedProfile'));
+    writeProfileFixture('Mismatched.json', profileFixture('OtherProfile'));
     writeProfileFixture('UnsafeEmbedded.json', profileFixture('../outside'));
 
     const profiles = listProfiles();
     expect(profiles).toContainEqual(expect.objectContaining({ name: 'listedprofile' }));
+    expect(profiles).toContainEqual({ name: 'mismatched', error: 'corrupted' });
     expect(profiles).toContainEqual({ name: 'unsafeembedded', error: 'corrupted' });
   });
 

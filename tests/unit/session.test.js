@@ -48,6 +48,15 @@ function writeSessionFixture(fileName, session) {
   );
 }
 
+function writeMainSerializedSession(name, overrides = {}) {
+  const legacyBasename = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const filePath = path.join(SESSIONS_DIR, `${legacyBasename}.json`);
+  const session = sessionFixture({ name, ...overrides });
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filePath, JSON.stringify(session, null, 2), { mode: 0o600 });
+  return filePath;
+}
+
 function supportsCaseSensitiveNames(directory) {
   const upper = path.join(directory, '__CaseProbe');
   const lower = path.join(directory, '__caseprobe');
@@ -101,6 +110,8 @@ describe('session', () => {
 
     expect(() => getSession('../outside')).toThrow('only letters');
     expect(() => saveSession('session.json', session)).toThrow('only letters');
+    expect(() => getSession('NUL')).toThrow('reserved Windows');
+    expect(() => getSession('Lpt1')).toThrow('reserved Windows');
   });
 
   it('canonicalizes case aliases to one session file and identity', () => {
@@ -129,6 +140,28 @@ describe('session', () => {
     }));
   });
 
+  it('migrates the exact session metadata shape serialized by main\'s old sanitizer', () => {
+    const filePath = writeMainSerializedSession('login.prod', {
+      profile: 'work.prod',
+      lastUrl: 'https://example.com',
+      history: ['https://example.com'],
+    });
+
+    const loaded = getSession('login_prod');
+    expect(loaded.name).toBe('login_prod');
+    expect(loaded.profile).toBe('work_prod');
+
+    // An otherwise unchanged snapshot save must still persist canonical metadata.
+    saveSessionSnapshot('login_prod', {
+      cookies: loaded.cookies,
+      lastUrl: loaded.lastUrl,
+    });
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toMatchObject({
+      name: 'login_prod',
+      profile: 'work_prod',
+    });
+  });
+
   it('detects case-insensitive session filename collisions on case-sensitive filesystems', () => {
     if (!supportsCaseSensitiveNames(SESSIONS_DIR)) return;
     writeSessionFixture('Login.json', sessionFixture({ name: 'Login' }));
@@ -138,11 +171,13 @@ describe('session', () => {
     expect(() => listSessions()).toThrow('filename collisions');
   });
 
-  it('uses canonical basenames and rejects unsafe embedded profile links', () => {
+  it('uses canonical basenames and rejects mismatched or path-like embedded metadata', () => {
+    writeSessionFixture('CanonicalSession.json', sessionFixture({ name: 'CanonicalSession' }));
     writeSessionFixture('RenamedSession.json', sessionFixture({ name: 'OldName' }));
     writeSessionFixture('UnsafeLink.json', sessionFixture({ profile: '../outside' }));
 
-    expect(getSession('renamedsession').name).toBe('renamedsession');
+    expect(getSession('canonicalsession').name).toBe('canonicalsession');
+    expect(() => getSession('renamedsession')).toThrow('invalid format');
     let error;
     try {
       getSession('unsafelink');
@@ -152,6 +187,7 @@ describe('session', () => {
     expect(error?.name).toBe('ProfileError');
     expect(error?.code).toBe(8);
     expect(error?.message).toContain('invalid format');
+    expect(listSessions()).toContainEqual({ name: 'renamedsession', error: 'corrupted' });
     expect(listSessions()).toContainEqual({ name: 'unsafelink', error: 'corrupted' });
   });
 

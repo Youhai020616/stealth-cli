@@ -6,8 +6,16 @@ import {
   createProfile, loadProfile, deleteProfile,
   listProfiles, getPresets,
 } from '../profiles.js';
+import { ProfileError, handleError } from '../errors.js';
 import { log } from '../output.js';
 import chalk from 'chalk';
+
+function reportProfileError(error) {
+  const profileError = error instanceof ProfileError
+    ? error
+    : new ProfileError(error?.message || String(error), { cause: error });
+  process.exitCode = handleError(profileError, { log, exit: false });
+}
 
 export function registerProfile(program) {
   const profile = program
@@ -35,8 +43,7 @@ export function registerProfile(program) {
         log.dim(`  Viewport: ${p.fingerprint.viewport.width}x${p.fingerprint.viewport.height}`);
         if (p.proxy) log.dim(`  Proxy:    ${p.proxy}`);
       } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+        reportProfileError(err);
       }
     });
 
@@ -45,27 +52,31 @@ export function registerProfile(program) {
     .command('list')
     .description('List all profiles')
     .action(() => {
-      const profiles = listProfiles();
-      if (profiles.length === 0) {
-        log.info('No profiles yet. Create one with: stealth profile create <name>');
-        return;
-      }
-
-      console.log(chalk.bold('\n  Profiles:\n'));
-      const header = `  ${'Name'.padEnd(18)} ${'Locale'.padEnd(8)} ${'OS'.padEnd(8)} ${'Viewport'.padEnd(12)} ${'Proxy'.padEnd(6)} ${'Cookies'.padEnd(8)} ${'Uses'.padEnd(6)}`;
-      console.log(chalk.dim(header));
-      console.log(chalk.dim('  ' + '─'.repeat(70)));
-
-      for (const p of profiles) {
-        if (p.error) {
-          console.log(`  ${chalk.red(p.name.padEnd(18))} ${chalk.dim('corrupted')}`);
-          continue;
+      try {
+        const profiles = listProfiles();
+        if (profiles.length === 0) {
+          log.info('No profiles yet. Create one with: stealth profile create <name>');
+          return;
         }
-        console.log(
-          `  ${chalk.cyan(p.name.padEnd(18))} ${p.locale.padEnd(8)} ${p.os.padEnd(8)} ${p.viewport.padEnd(12)} ${p.proxy.padEnd(6)} ${String(p.cookies).padEnd(8)} ${String(p.useCount).padEnd(6)}`,
-        );
+
+        console.log(chalk.bold('\n  Profiles:\n'));
+        const header = `  ${'Name'.padEnd(18)} ${'Locale'.padEnd(8)} ${'OS'.padEnd(8)} ${'Viewport'.padEnd(12)} ${'Proxy'.padEnd(6)} ${'Cookies'.padEnd(8)} ${'Uses'.padEnd(6)}`;
+        console.log(chalk.dim(header));
+        console.log(chalk.dim('  ' + '─'.repeat(70)));
+
+        for (const p of profiles) {
+          if (p.error) {
+            console.log(`  ${chalk.red(p.name.padEnd(18))} ${chalk.dim(p.error)}`);
+            continue;
+          }
+          console.log(
+            `  ${chalk.cyan(p.name.padEnd(18))} ${p.locale.padEnd(8)} ${p.os.padEnd(8)} ${p.viewport.padEnd(12)} ${p.proxy.padEnd(6)} ${String(p.cookies).padEnd(8)} ${String(p.useCount).padEnd(6)}`,
+          );
+        }
+        console.log();
+      } catch (err) {
+        reportProfileError(err);
       }
-      console.log();
     });
 
   // stealth profile show <name>
@@ -78,8 +89,7 @@ export function registerProfile(program) {
         const p = loadProfile(name);
         console.log(JSON.stringify(p, null, 2));
       } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+        reportProfileError(err);
       }
     });
 
@@ -93,8 +103,7 @@ export function registerProfile(program) {
         deleteProfile(name);
         log.success(`Profile "${name}" deleted`);
       } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+        reportProfileError(err);
       }
     });
 
