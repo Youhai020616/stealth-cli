@@ -439,7 +439,7 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 
 ## Project Stats
 
-```
+```text
 Version:     0.6.1
 Commands:    17
 Tests:       428 passing (29 test files)

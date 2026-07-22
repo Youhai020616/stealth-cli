@@ -103,7 +103,7 @@ export function registerProxy(program) {
             log.success(`Proxy OK — IP: ${result.ip}, Latency: ${result.latency}ms`);
           } else {
             reportProxyError(
-              new ProxyError(url, new Error(result.error)),
+              new ProxyError(url, new Error(result.error), { message: result.error }),
               'test',
               url,
             );

@@ -16,14 +16,28 @@ function configValueForDisplay(key, value) {
   return value;
 }
 
+function storageDiagnostic(error) {
+  const code = typeof error?.code === 'string' && /^[A-Z0-9_]+$/u.test(error.code)
+    ? error.code
+    : null;
+  if (!code) return '';
+  const syscall = typeof error?.syscall === 'string' && /^[a-z0-9_-]+$/iu.test(error.syscall)
+    ? error.syscall
+    : null;
+  return ` (${code}${syscall ? ` during ${syscall}` : ''})`;
+}
+
 function reportConfigError(error, operation) {
   const configError = error instanceof StealthError
     ? error
-    : new StealthError(`Failed to ${operation} global configuration`, {
-      code: 1,
-      hint: `Check ownership, permissions, and contents for: ${CONFIG_FILE}`,
-      cause: error,
-    });
+    : new StealthError(
+      `Failed to ${operation} global configuration${storageDiagnostic(error)}`,
+      {
+        code: 1,
+        hint: `Check ownership, permissions, and contents for: ${CONFIG_FILE}`,
+        cause: error,
+      },
+    );
   process.exitCode = handleError(configError, { log, exit: false });
 }
 

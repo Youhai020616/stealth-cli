@@ -43,7 +43,7 @@ describe('proxy command failures', () => {
   it('routes a negative single test through handleError with code 7', async () => {
     proxyMocks.testProxy.mockResolvedValue({
       ok: false,
-      error: 'Proxy connection failed: http://proxy.example:8080',
+      error: 'Proxy authentication rejected by upstream',
       proxy: 'http://****@proxy.example:8080',
     });
     const errorLog = vi.spyOn(log, 'error').mockImplementation(() => {});
@@ -58,7 +58,7 @@ describe('proxy command failures', () => {
     ]);
 
     expect(process.exitCode).toBe(7);
-    expect(errorLog).toHaveBeenCalledWith('Proxy connection failed: http://proxy.example:8080');
+    expect(errorLog).toHaveBeenCalledWith('Proxy authentication rejected by upstream');
     expect(hintLog.mock.calls.flat().join(' ')).toContain('stealth proxy test');
     expect(errorLog.mock.calls.flat().join(' ')).not.toContain('secret');
   });

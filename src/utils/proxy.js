@@ -5,6 +5,15 @@ function invalidProxyError() {
   return new TypeError('Invalid proxy URL format');
 }
 
+function decodeProxyCredential(value) {
+  if (!value) return undefined;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw invalidProxyError();
+  }
+}
+
 /**
  * Parse and validate an HTTP(S) proxy URL.
  *
@@ -39,6 +48,8 @@ export function parseProxyUrl(value) {
   ) {
     throw invalidProxyError();
   }
+  decodeProxyCredential(parsed.username);
+  decodeProxyCredential(parsed.password);
 
   return parsed;
 }
@@ -53,8 +64,8 @@ export function toPlaywrightProxy(value) {
   const parsed = parseProxyUrl(value);
   return {
     server: `${parsed.protocol}//${parsed.host}`,
-    username: parsed.username || undefined,
-    password: parsed.password || undefined,
+    username: decodeProxyCredential(parsed.username),
+    password: decodeProxyCredential(parsed.password),
   };
 }
 

@@ -81,7 +81,7 @@ vi.mock('../../src/output.js', () => ({
   },
 }));
 
-import { launchBrowser, navigate } from '../../src/browser.js';
+import { getUrl, launchBrowser, navigate } from '../../src/browser.js';
 import {
   createBrowserLifecycle,
   createLaunchSignalGuard,
@@ -161,6 +161,21 @@ describe('interactive command', () => {
       restoreSessionUrl: false,
     }));
     expect(navigate).toHaveBeenCalledWith(expect.any(Object), 'https://example.com');
+  });
+
+  it('describes an opaque about:blank origin as the current page', async () => {
+    getUrl.mockResolvedValueOnce('about:blank');
+    const program = new Command();
+    program.exitOverride();
+    registerInteractive(program);
+
+    await program.parseAsync([
+      'interactive',
+      '--url',
+      'about:blank',
+    ], { from: 'user' });
+
+    expect(log.info).toHaveBeenCalledWith('Current page: current page');
   });
 
   it('should preserve a signal result when navigation failure loses finalization arbitration', async () => {

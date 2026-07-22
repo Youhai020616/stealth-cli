@@ -46,7 +46,8 @@ import { closeBrowserForCli } from "../utils/close-browser-cli.js";
 
 function describeUrl(value) {
   try {
-    return new URL(value).origin;
+    const origin = new URL(value).origin;
+    return origin && origin !== 'null' ? origin : 'current page';
   } catch {
     return 'current page';
   }

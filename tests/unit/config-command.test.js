@@ -93,6 +93,24 @@ describe('config command credential display', () => {
     expect(rendered).not.toContain('do-not-leak');
   });
 
+  it('reports safe filesystem diagnostics without exposing the raw cause', async () => {
+    const storageError = new Error('write failed password=do-not-leak');
+    storageError.code = 'ENOSPC';
+    storageError.syscall = 'write';
+    configMocks.resetConfig.mockImplementation(() => {
+      throw storageError;
+    });
+    const errorLog = vi.spyOn(log, 'error').mockImplementation(() => {});
+    vi.spyOn(log, 'dim').mockImplementation(() => {});
+
+    await programForConfig().parseAsync(['node', 'stealth', 'config', 'reset']);
+
+    expect(process.exitCode).toBe(1);
+    const rendered = errorLog.mock.calls.flat().join(' ');
+    expect(rendered).toContain('Failed to reset global configuration (ENOSPC during write)');
+    expect(rendered).not.toContain('do-not-leak');
+  });
+
   it('masks proxy userinfo in set confirmation output', async () => {
     const proxy = 'http://api-token:proxy-secret@proxy.example:8080';
     configMocks.setConfigValue.mockReturnValue(proxy);

@@ -28,6 +28,11 @@ describe('proxy URL utilities', () => {
       username: 'user',
       password: 'secret',
     });
+    expect(toPlaywrightProxy('http://user%40example.com:p%40ss%3Aword@proxy.example:8080')).toEqual({
+      server: 'http://proxy.example:8080',
+      username: 'user@example.com',
+      password: 'p@ss:word',
+    });
     expect(toPlaywrightProxy('https://[2001:db8::1]:8443')).toEqual({
       server: 'https://[2001:db8::1]:8443',
       username: undefined,
@@ -48,6 +53,7 @@ describe('proxy URL utilities', () => {
     'http://proxy.example:8080?token=secret',
     'http://proxy.example:8080#secret',
     'http://',
+    'http://user%ZZ:secret@proxy.example:8080',
   ])('rejects an invalid proxy URL without partial acceptance: %j', (value) => {
     expect(isValidProxyUrl(value)).toBe(false);
     expect(() => parseProxyUrl(value)).toThrow('Invalid proxy URL format');
