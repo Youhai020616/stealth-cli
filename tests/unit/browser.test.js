@@ -1063,6 +1063,42 @@ describe('closeBrowser', () => {
     expect(stateLease).toHaveBeenCalledTimes(2);
   });
 
+  it('should retain and report a replacement-journal cleanup failure in default and strict modes', async () => {
+    const exactHint = 'After confirming no stealth process is using this state, remove this exact lock journal file: /tmp/locks/replaced.lock';
+    const lockError = new ProfileError(
+      'replacement lock journal still contains this process\'s active claim',
+      { hint: exactHint },
+    );
+    const stateLease = createStateLease({ profile: 'work' });
+    stateLease.mockImplementation(() => {
+      throw lockError;
+    });
+    const { handle } = await launchStatefulBrowser(
+      { profile: 'work' },
+      setupMockBrowser(),
+      stateLease,
+    );
+
+    const defaultResult = await closeBrowser(handle);
+    expect(defaultResult.cleanupErrors).toEqual([
+      { target: 'state-lock', error: lockError },
+    ]);
+
+    let strictFailure;
+    try {
+      await closeBrowser(handle, { strict: true });
+    } catch (error) {
+      strictFailure = error;
+    }
+
+    expect(strictFailure).toMatchObject({
+      name: 'BrowserCleanupError',
+      failures: [{ target: 'state-lock', error: lockError }],
+    });
+    expect(strictFailure.format()).toContain(exactHint);
+    expect(stateLease).toHaveBeenCalledTimes(2);
+  });
+
   it('should create separate strict errors for concurrent callers without mutating cached persistence', async () => {
     const cleanupError = new Error('browser busy');
     const mocks = setupMockBrowser();

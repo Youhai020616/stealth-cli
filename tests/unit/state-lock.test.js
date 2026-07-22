@@ -598,6 +598,118 @@ describe('state lock journals', () => {
     successor();
   });
 
+  it('fails cleanup when a replacement journal retains the current active claim', () => {
+    const lease = acquireStateLocks({ profile: 'copied' });
+    const journalPath = stateLockPath('profile', 'copied');
+    const displacedPath = `${journalPath}.displaced`;
+    fs.renameSync(journalPath, displacedPath);
+    const copiedContents = fs.readFileSync(displacedPath, 'utf8');
+    fs.writeFileSync(journalPath, copiedContents, { mode: 0o600 });
+    const retryWrite = vi.spyOn(fs, 'writeSync');
+
+    expect(lease.owns('profile', 'copied')).toBe(false);
+    let failure;
+    try {
+      lease();
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'ProfileError',
+      hint: journalRemovalHint(journalPath),
+    });
+    expect(failure.message).toContain('still contains this process\'s active claim');
+    expect(lease.owns('profile', 'copied')).toBe(false);
+    expect(retryWrite).not.toHaveBeenCalled();
+    expect(fs.readFileSync(journalPath, 'utf8')).toBe(copiedContents);
+    expect(fs.readFileSync(displacedPath, 'utf8')).toBe(copiedContents);
+
+    vi.restoreAllMocks();
+    fs.rmSync(journalPath);
+    expect(() => lease()).not.toThrow();
+  });
+
+  it('fails closed when a replacement journal cannot be inspected safely', () => {
+    const lease = acquireStateLocks({ profile: 'malformed-copy' });
+    const journalPath = stateLockPath('profile', 'malformed-copy');
+    const displacedPath = `${journalPath}.displaced`;
+    fs.renameSync(journalPath, displacedPath);
+    fs.writeFileSync(journalPath, '{"op":"claim"}\n', { mode: 0o600 });
+    const replacementContents = fs.readFileSync(journalPath, 'utf8');
+
+    let failure;
+    try {
+      lease();
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'ProfileError',
+      hint: journalRemovalHint(journalPath),
+    });
+    expect(failure.message).toContain('could not be inspected safely');
+    expect(lease.owns('profile', 'malformed-copy')).toBe(false);
+    expect(fs.readFileSync(journalPath, 'utf8')).toBe(replacementContents);
+
+    fs.rmSync(journalPath);
+    expect(() => lease()).not.toThrow();
+  });
+
+  it('fails a published-release retry when a replacement restores the old active claim', () => {
+    const lease = acquireStateLocks({ session: 'published-copy' });
+    const journalPath = stateLockPath('session', 'published-copy');
+    const fsyncSync = fs.fsyncSync.bind(fs);
+    let failed = false;
+
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
+      if (!failed) {
+        failed = true;
+        const error = new Error('transient fsync failure');
+        error.code = 'EIO';
+        throw error;
+      }
+      return fsyncSync(descriptor);
+    });
+
+    expect(() => lease()).toThrow('transient fsync failure');
+    const releasedRecords = readJournalRecords(journalPath);
+    const oldClaim = releasedRecords.find(({ op }) => op === 'claim');
+    expect(activeClaims(releasedRecords)).toEqual([]);
+    vi.restoreAllMocks();
+
+    const displacedPath = `${journalPath}.displaced`;
+    fs.renameSync(journalPath, displacedPath);
+    writeJournal('session', 'published-copy', [oldClaim]);
+    const replacementContents = fs.readFileSync(journalPath, 'utf8');
+    const displacedContents = fs.readFileSync(displacedPath, 'utf8');
+    const retryWrite = vi.spyOn(fs, 'writeSync');
+    const retryFsync = vi.spyOn(fs, 'fsyncSync');
+
+    let failure;
+    try {
+      lease();
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'ProfileError',
+      hint: journalRemovalHint(journalPath),
+    });
+    expect(failure.message).toContain('still contains this process\'s active claim');
+    expect(lease.owns('session', 'published-copy')).toBe(false);
+    expect(retryWrite).not.toHaveBeenCalled();
+    expect(retryFsync).not.toHaveBeenCalled();
+    expect(fs.readFileSync(journalPath, 'utf8')).toBe(replacementContents);
+    expect(fs.readFileSync(displacedPath, 'utf8')).toBe(displacedContents);
+
+    vi.restoreAllMocks();
+    fs.rmSync(journalPath);
+    expect(() => lease()).not.toThrow();
+  });
+
   it('clears an old lease without modifying an externally replaced successor journal', () => {
     const oldLease = acquireStateLocks({ profile: 'work' });
     const journalPath = stateLockPath('profile', 'work');
@@ -607,13 +719,16 @@ describe('state lock journals', () => {
     const successor = acquireStateLocks({ profile: 'work' });
     const successorContents = fs.readFileSync(journalPath, 'utf8');
     const displacedContents = fs.readFileSync(displacedPath, 'utf8');
+    const oldReleaseWrite = vi.spyOn(fs, 'writeSync');
 
     expect(() => oldLease()).not.toThrow();
+    expect(oldReleaseWrite).not.toHaveBeenCalled();
     expect(oldLease.owns('profile', 'work')).toBe(false);
     expect(fs.readFileSync(journalPath, 'utf8')).toBe(successorContents);
     expect(fs.readFileSync(displacedPath, 'utf8')).toBe(displacedContents);
     expect(successor.owns('profile', 'work')).toBe(true);
 
+    vi.restoreAllMocks();
     successor();
   });
 

@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { ProxyError } from './errors.js';
+import { maskProxyUrl, parseProxyUrl, toPlaywrightProxy } from './utils/proxy.js';
 
 const STEALTH_DIR = path.join(os.homedir(), '.stealth');
 const PROXIES_FILE = path.join(STEALTH_DIR, 'proxies.json');
@@ -41,6 +42,12 @@ function saveData(data) {
  * @param {string} [opts.region] - Geographic region
  */
 export function addProxy(proxyUrl, opts = {}) {
+  try {
+    parseProxyUrl(proxyUrl);
+  } catch (cause) {
+    throw new ProxyError(proxyUrl, cause);
+  }
+
   const data = loadData();
 
   // Check for duplicates
@@ -81,7 +88,7 @@ export function removeProxy(proxyUrl) {
 export function listProxies() {
   const data = loadData();
   return data.proxies.map((p) => ({
-    url: maskPassword(p.url),
+    url: maskProxyUrl(p.url),
     label: p.label || '-',
     region: p.region || '-',
     status: p.lastStatus || 'unknown',
@@ -168,17 +175,11 @@ export async function testProxy(proxyUrl) {
   let browser;
 
   try {
-    // Parse proxy URL
     let proxyConfig;
     try {
-      const url = new URL(proxyUrl.startsWith('http') ? proxyUrl : `http://${proxyUrl}`);
-      proxyConfig = {
-        server: `${url.protocol}//${url.hostname}:${url.port}`,
-        username: url.username || undefined,
-        password: url.password || undefined,
-      };
-    } catch {
-      throw new ProxyError(proxyUrl, new Error('Invalid proxy URL format'));
+      proxyConfig = toPlaywrightProxy(proxyUrl);
+    } catch (cause) {
+      throw new ProxyError(proxyUrl, cause);
     }
 
     browser = await createBrowser({ headless: true, proxy: proxyConfig });
@@ -201,7 +202,7 @@ export async function testProxy(proxyUrl) {
       ok: true,
       ip,
       latency,
-      proxy: maskPassword(proxyUrl),
+      proxy: maskProxyUrl(proxyUrl),
     };
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
@@ -211,7 +212,7 @@ export async function testProxy(proxyUrl) {
       ok: false,
       error: err.message,
       latency: Date.now() - start,
-      proxy: maskPassword(proxyUrl),
+      proxy: maskProxyUrl(proxyUrl),
     };
   }
 }
@@ -236,19 +237,4 @@ export async function testAllProxies() {
  */
 export function poolSize() {
   return loadData().proxies.length;
-}
-
-/**
- * Mask password in proxy URL for display
- */
-function maskPassword(url) {
-  try {
-    const parsed = new URL(url.startsWith('http') ? url : `http://${url}`);
-    if (parsed.password) {
-      parsed.password = '****';
-    }
-    return parsed.toString().replace(/\/$/, '');
-  } catch {
-    return url;
-  }
 }

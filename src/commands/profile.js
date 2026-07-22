@@ -8,6 +8,7 @@ import {
 } from '../profiles.js';
 import { ProfileError, handleError } from '../errors.js';
 import { log } from '../output.js';
+import { maskProxyUrl } from '../utils/proxy.js';
 import chalk from 'chalk';
 
 function reportProfileError(error) {
@@ -41,7 +42,7 @@ export function registerProfile(program) {
         log.dim(`  Timezone: ${p.fingerprint.timezone}`);
         log.dim(`  OS:       ${p.fingerprint.os}`);
         log.dim(`  Viewport: ${p.fingerprint.viewport.width}x${p.fingerprint.viewport.height}`);
-        if (p.proxy) log.dim(`  Proxy:    ${p.proxy}`);
+        if (p.proxy) log.dim(`  Proxy:    ${maskProxyUrl(p.proxy)}`);
       } catch (err) {
         reportProfileError(err);
       }

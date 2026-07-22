@@ -363,11 +363,26 @@ describe('profiles', () => {
     expect(() => createProfile(TEST_PROFILE, { preset: 'nonexistent' })).toThrow('Unknown preset');
   });
 
-  it('should save proxy in profile', () => {
-    const p = createProfile(TEST_PROFILE, { preset: 'us-desktop', proxy: 'http://proxy:8080' });
-    expect(p.proxy).toBe('http://proxy:8080');
+  it('should save a validated proxy in a profile', () => {
+    const proxy = 'HTTP://user:secret@proxy:8080';
+    const p = createProfile(TEST_PROFILE, { preset: 'us-desktop', proxy });
+    expect(p.proxy).toBe(proxy);
     const loaded = loadProfile(TEST_PROFILE);
-    expect(loaded.proxy).toBe('http://proxy:8080');
+    expect(loaded.proxy).toBe(proxy);
+  });
+
+  it('should reject an invalid profile proxy before persisting it', () => {
+    const invalid = 'http://user:do-not-leak@proxy:8080/private';
+    let failure;
+    try {
+      createProfile(TEST_PROFILE, { preset: 'us-desktop', proxy: invalid });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({ name: 'ProfileError', code: 8 });
+    expect(failure.message).not.toContain('do-not-leak');
+    expect(() => loadProfile(TEST_PROFILE)).toThrow('not found');
   });
 
   it('should persist and restore a captured cookie snapshot', async () => {

@@ -18,6 +18,7 @@ import {
   ensurePrivateFile,
   writeJsonAtomic,
 } from './utils/json-file.js';
+import { isValidProxyUrl } from './utils/proxy.js';
 import { withStateLock } from './utils/state-lock.js';
 import {
   assertStateName,
@@ -193,23 +194,6 @@ function isValidTimezone(value) {
   }
 }
 
-function isValidProxy(value) {
-  if (!isNonEmptyString(value)) return false;
-  try {
-    const candidate = /^[a-z][a-z\d+.-]*:\/\//iu.test(value)
-      ? value
-      : `http://${value}`;
-    const parsed = new URL(candidate);
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
-      && parsed.hostname.length > 0
-      && parsed.pathname === '/'
-      && !parsed.search
-      && !parsed.hash;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Validate a cookie before it is persisted or passed to Playwright.
  */
@@ -308,7 +292,7 @@ export function validateStoredProfile(profile, canonicalName, requestedName = ca
   if (
     !isPlainObject(profile)
     || !isValidFingerprint(profile.fingerprint)
-    || (profile.proxy !== null && !isValidProxy(profile.proxy))
+    || (profile.proxy !== null && !isValidProxyUrl(profile.proxy))
     || !Array.isArray(profile.cookies)
     || !profile.cookies.every(isValidPersistedCookie)
   ) {
@@ -413,6 +397,11 @@ export function createProfile(name, opts = {}) {
         `Profile "${canonicalName}" already exists. Use --force to overwrite.`,
       );
     }
+    if (opts.proxy !== undefined && opts.proxy !== null && !isValidProxyUrl(opts.proxy)) {
+      throw new ProfileError(`Profile "${canonicalName}" has an invalid proxy URL`, {
+        hint: 'Use an HTTP(S) proxy in the form [http://][user:password@]host[:port]',
+      });
+    }
 
     let fingerprint;
     if (opts.preset) {
@@ -440,7 +429,7 @@ export function createProfile(name, opts = {}) {
       id: crypto.randomUUID(),
       name: canonicalName,
       fingerprint,
-      proxy: opts.proxy || null,
+      proxy: opts.proxy ?? null,
       cookies: [],
       createdAt: new Date().toISOString(),
       lastUsed: null,

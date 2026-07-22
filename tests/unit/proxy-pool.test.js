@@ -1,5 +1,18 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { addProxy, removeProxy, listProxies, getNextProxy, getRandomProxy, poolSize } from '../../src/proxy-pool.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const createBrowser = vi.hoisted(() => vi.fn());
+
+vi.mock('../../src/utils/browser-factory.js', () => ({ createBrowser }));
+
+import {
+  addProxy,
+  removeProxy,
+  listProxies,
+  getNextProxy,
+  getRandomProxy,
+  poolSize,
+  testProxy,
+} from '../../src/proxy-pool.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -8,6 +21,7 @@ const PROXIES_FILE = path.join(os.homedir(), '.stealth', 'proxies.json');
 let backup = null;
 
 beforeEach(() => {
+  createBrowser.mockReset();
   try {
     backup = fs.existsSync(PROXIES_FILE) ? fs.readFileSync(PROXIES_FILE, 'utf-8') : null;
   } catch {}
@@ -39,6 +53,20 @@ describe('proxy-pool', () => {
   it('should reject duplicate proxy', () => {
     addProxy('http://proxy1:8080');
     expect(() => addProxy('http://proxy1:8080')).toThrow('already exists');
+  });
+
+  it('should reject invalid proxies without exposing credentials or mutating the pool', () => {
+    const invalid = 'HTTP://user:do-not-leak@proxy.example:8080/private';
+    let failure;
+    try {
+      addProxy(invalid);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({ name: 'ProxyError', code: 7 });
+    expect(failure.message).not.toContain('do-not-leak');
+    expect(poolSize()).toBe(0);
   });
 
   it('should rotate proxies round-robin', () => {
@@ -85,10 +113,10 @@ describe('proxy-pool', () => {
     expect(getRandomProxy()).toBeNull();
   });
 
-  it('should mask password in listed proxies', () => {
-    addProxy('http://user:secret@proxy:8080');
+  it('should normalize uppercase schemes and mask passwords in listed proxies', () => {
+    addProxy('HTTP://user:secret@proxy:8080');
     const list = listProxies();
-    expect(list[0].url).toContain('****');
+    expect(list[0].url).toBe('http://user:****@proxy:8080');
     expect(list[0].url).not.toContain('secret');
   });
 
@@ -98,5 +126,48 @@ describe('proxy-pool', () => {
     getNextProxy();
     const list = listProxies();
     expect(list[0].useCount).toBe(2);
+  });
+
+  it('should redact invalid credentials when proxy testing fails before launch', async () => {
+    const result = await testProxy('HTTP://user:do-not-leak@proxy.example:8080/private');
+
+    expect(createBrowser).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      ok: false,
+      proxy: 'invalid proxy',
+    });
+    expect(result.error).not.toContain('do-not-leak');
+  });
+
+  it('should test uppercase credentialed IPv6 proxies with normalized Playwright options', async () => {
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      textContent: vi.fn().mockResolvedValue('{"origin":"203.0.113.10"}'),
+    };
+    const context = {
+      newPage: vi.fn().mockResolvedValue(page),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const browser = {
+      newContext: vi.fn().mockResolvedValue(context),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    createBrowser.mockResolvedValue(browser);
+
+    const result = await testProxy('HTTP://user:secret@[2001:db8::1]:8080');
+
+    expect(createBrowser).toHaveBeenCalledWith({
+      headless: true,
+      proxy: {
+        server: 'http://[2001:db8::1]:8080',
+        username: 'user',
+        password: 'secret',
+      },
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      ip: '203.0.113.10',
+      proxy: 'http://user:****@[2001:db8::1]:8080',
+    });
   });
 });

@@ -16,6 +16,12 @@ const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 // reintroduce pathname-delete ABA. Fail closed and require explicit operator
 // maintenance instead of parsing an attacker- or accident-controlled size.
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
+const READ_OPEN_FLAGS = (
+  fs.constants.O_RDONLY
+  | (fs.constants.O_NOFOLLOW || 0)
+  | (fs.constants.O_CLOEXEC || 0)
+  | (fs.constants.O_NONBLOCK || 0)
+);
 const APPEND_OPEN_FLAGS = (
   fs.constants.O_RDWR
   | fs.constants.O_APPEND
@@ -207,14 +213,17 @@ function validateOpenedJournal(descriptor, journalPath) {
   return identity;
 }
 
-function openJournal(target, { create }) {
+function openJournal(target, { create, readOnly = false, allowAbsent = false }) {
   const journalPath = lockPath(target);
   let descriptor;
   let created = false;
   let failure;
 
   try {
-    if (create) {
+    if (readOnly) {
+      if (create) throw new TypeError('A read-only lock journal cannot be created');
+      descriptor = fs.openSync(journalPath, READ_OPEN_FLAGS);
+    } else if (create) {
       try {
         descriptor = fs.openSync(journalPath, CREATE_OPEN_FLAGS, 0o600);
         created = true;
@@ -229,6 +238,7 @@ function openJournal(target, { create }) {
     const identity = validateOpenedJournal(descriptor, journalPath);
     return { descriptor, identity, journalPath, created };
   } catch (error) {
+    if (allowAbsent && descriptor === undefined && error.code === 'ENOENT') return null;
     failure = error;
   }
 
@@ -542,6 +552,71 @@ function closeFailure(target, journalPath, cause) {
   );
 }
 
+function replacementClaimError(target, journalPath) {
+  return new ProfileError(
+    `${target.kind} "${target.name}" replacement lock journal still contains this process's active claim`,
+    { hint: manualRemovalHint(journalPath) },
+  );
+}
+
+function replacementInspectionFailure(target, journalPath, cause) {
+  return new ProfileError(
+    `${target.kind} "${target.name}" replacement lock journal could not be inspected safely`,
+    { hint: manualRemovalHint(journalPath), cause },
+  );
+}
+
+function inspectDetachedJournalPath(record) {
+  let currentOpened;
+  let currentClaimIsActive = false;
+  let failure;
+
+  try {
+    currentOpened = openJournal(record.target, {
+      create: false,
+      readOnly: true,
+      allowAbsent: true,
+    });
+
+    if (!currentOpened) {
+      if (journalPathStatus(record.opened) !== 'absent') {
+        throw replacedJournalError(record.opened.journalPath);
+      }
+      return;
+    }
+
+    const journal = readJournal(record.target, currentOpened);
+    currentClaimIsActive = journal.activeClaims.some(({ token }) => token === record.token);
+  } catch (cause) {
+    failure = cause;
+  }
+
+  if (currentOpened) {
+    try {
+      closeOpenedJournal(currentOpened);
+    } catch (cause) {
+      const closeError = closeFailure(
+        record.target,
+        record.opened.journalPath,
+        cause,
+      );
+      if (failure) attachStateCleanupFailures(failure, [cleanupEntry(record.target, closeError)]);
+      else failure = closeError;
+    }
+  }
+
+  if (failure) {
+    throw replacementInspectionFailure(
+      record.target,
+      record.opened.journalPath,
+      failure,
+    );
+  }
+  if (currentClaimIsActive) {
+    throw replacementClaimError(record.target, record.opened.journalPath);
+  }
+}
+
 function createRelease(record) {
   let writeAuthorized = true;
   let releasePublished = false;
@@ -577,6 +652,14 @@ function createRelease(record) {
   }
 
   function finishPublishedRelease() {
+    let status;
+    try {
+      status = journalPathStatus(record.opened);
+    } catch (cause) {
+      throw verificationFailure(cause);
+    }
+    if (status !== 'same') inspectDetachedJournalPath(record);
+
     confirmReleaseDurability();
     finishClose();
   }
@@ -588,9 +671,6 @@ function createRelease(record) {
       try {
         if (journalPathStatus(record.opened) !== 'same') {
           writeAuthorized = false;
-          try {
-            finishClose();
-          } catch {}
           return false;
         }
 
@@ -628,6 +708,7 @@ function createRelease(record) {
       }
       if (status !== 'same') {
         writeAuthorized = false;
+        inspectDetachedJournalPath(record);
         finishClose();
         return;
       }

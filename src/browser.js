@@ -42,6 +42,7 @@ import {
 } from "./errors.js";
 import { buildA11yTree, clickByRef, typeByRef, hoverByRef } from "./a11y.js";
 import { acquireStateLocks, ownsStateLock } from "./utils/state-lock.js";
+import { toPlaywrightProxy } from "./utils/proxy.js";
 import { assertStateName } from "./utils/storage-paths.js";
 
 const closeStates = new WeakMap();
@@ -109,25 +110,7 @@ function buildProxy(proxyStr) {
   if (!proxyStr) return null;
 
   try {
-    const candidate = /^[a-z][a-z\d+.-]*:\/\//iu.test(proxyStr)
-      ? proxyStr
-      : `http://${proxyStr}`;
-    const url = new URL(candidate);
-    if (
-      !["http:", "https:"].includes(url.protocol) ||
-      !url.hostname ||
-      url.pathname !== "/" ||
-      url.search ||
-      url.hash
-    ) {
-      throw new Error("Invalid proxy URL");
-    }
-
-    return {
-      server: `${url.protocol}//${url.host}`,
-      username: url.username || undefined,
-      password: url.password || undefined,
-    };
+    return toPlaywrightProxy(proxyStr);
   } catch (cause) {
     throw new ProxyError(proxyStr, cause);
   }

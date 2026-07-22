@@ -9,6 +9,7 @@ import {
   testProxy, testAllProxies, poolSize,
 } from '../proxy-pool.js';
 import { log } from '../output.js';
+import { maskProxyUrl } from '../utils/proxy.js';
 
 export function registerProxy(program) {
   const proxy = program
@@ -77,7 +78,7 @@ export function registerProxy(program) {
     .argument('[url]', 'Specific proxy URL to test (or test all)')
     .action(async (url) => {
       if (url) {
-        const spinner = ora(`Testing ${url}...`).start();
+        const spinner = ora(`Testing ${maskProxyUrl(url)}...`).start();
         const result = await testProxy(url);
         spinner.stop();
 
