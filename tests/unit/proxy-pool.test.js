@@ -1,10 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 
 const createBrowser = vi.hoisted(() => vi.fn());
 
 vi.mock('../../src/utils/browser-factory.js', () => ({ createBrowser }));
 
-import {
+const ORIGINAL_HOME = process.env.HOME;
+const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-proxy-home-'));
+process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
+vi.resetModules();
+
+const {
   addProxy,
   removeProxy,
   listProxies,
@@ -12,31 +22,22 @@ import {
   getRandomProxy,
   poolSize,
   testProxy,
-} from '../../src/proxy-pool.js';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-
-const PROXIES_FILE = path.join(os.homedir(), '.stealth', 'proxies.json');
-let backup = null;
+} = await import('../../src/proxy-pool.js');
+const PROXIES_FILE = path.join(TEST_HOME, '.stealth', 'proxies.json');
 
 beforeEach(() => {
   createBrowser.mockReset();
-  try {
-    backup = fs.existsSync(PROXIES_FILE) ? fs.readFileSync(PROXIES_FILE, 'utf-8') : null;
-  } catch {}
-  // Reset to empty pool
-  const dir = path.dirname(PROXIES_FILE);
-  fs.mkdirSync(dir, { recursive: true });
+  const directory = path.dirname(PROXIES_FILE);
+  fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(PROXIES_FILE, JSON.stringify({ proxies: [], lastRotateIndex: 0 }));
 });
 
-afterEach(() => {
-  if (backup) {
-    fs.writeFileSync(PROXIES_FILE, backup);
-  } else {
-    fs.writeFileSync(PROXIES_FILE, JSON.stringify({ proxies: [], lastRotateIndex: 0 }));
-  }
+afterAll(() => {
+  if (ORIGINAL_HOME === undefined) delete process.env.HOME;
+  else process.env.HOME = ORIGINAL_HOME;
+  if (ORIGINAL_USERPROFILE === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = ORIGINAL_USERPROFILE;
+  fs.rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
 describe('proxy-pool', () => {
