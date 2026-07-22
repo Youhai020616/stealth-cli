@@ -73,6 +73,36 @@ describe('proxy-pool', () => {
     expect(poolSize()).toBe(0);
   });
 
+  it('should fail closed on malformed or invalid persisted proxy-pool data', () => {
+    fs.writeFileSync(PROXIES_FILE, '{"proxies":', { mode: 0o600 });
+    expect(() => listProxies()).toThrow('invalid format');
+
+    const invalid = 'http://user:do-not-leak@proxy.example:8080/private';
+    fs.writeFileSync(PROXIES_FILE, JSON.stringify({
+      proxies: [{
+        url: invalid,
+        label: null,
+        region: null,
+        addedAt: new Date(0).toISOString(),
+        lastUsed: null,
+        useCount: 0,
+        lastStatus: null,
+        lastLatency: null,
+        failCount: 0,
+      }],
+      lastRotateIndex: 0,
+    }), { mode: 0o600 });
+
+    let failure;
+    try {
+      listProxies();
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ name: 'ProxyError', code: 7 });
+    expect(JSON.stringify(failure)).not.toContain('do-not-leak');
+  });
+
   it('should rotate proxies round-robin', () => {
     addProxy('http://a:1');
     addProxy('http://b:2');

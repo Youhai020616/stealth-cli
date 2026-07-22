@@ -67,6 +67,12 @@ describe('resolveOpts', () => {
     expect(opts.headless).toBe(true); // Both agree, no conflict
   });
 
+  it('should fail before resolving options from malformed persisted config', () => {
+    fs.writeFileSync(CONFIG_FILE, '{"proxy":"http://proxy.example:8080"', { mode: 0o600 });
+
+    expect(() => resolveOpts({})).toThrow('contains malformed JSON');
+  });
+
   it('should handle proxy from config', () => {
     setConfigValue('proxy', 'http://proxy:8080');
     const opts = resolveOpts({});

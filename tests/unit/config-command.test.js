@@ -15,6 +15,7 @@ vi.mock('../../src/config.js', () => ({
 }));
 
 import { registerConfig } from '../../src/commands/config.js';
+import { ProxyError } from '../../src/errors.js';
 import { log } from '../../src/output.js';
 
 function programForConfig() {
@@ -50,6 +51,46 @@ describe('config command credential display', () => {
     expect(rendered).toContain('http://****@proxy.example:8080');
     expect(rendered).not.toContain('api-token');
     expect(rendered).not.toContain('proxy-secret');
+  });
+
+  it('reports invalid proxy settings through handleError with exit code 7', async () => {
+    const invalid = 'http://user:do-not-leak@proxy.example:8080/private';
+    configMocks.setConfigValue.mockImplementation(() => {
+      throw new ProxyError(invalid, new Error('invalid proxy'), {
+        message: 'Global configuration contains an invalid proxy URL',
+      });
+    });
+    const errorLog = vi.spyOn(log, 'error').mockImplementation(() => {});
+    vi.spyOn(log, 'dim').mockImplementation(() => {});
+
+    await programForConfig().parseAsync([
+      'node',
+      'stealth',
+      'config',
+      'set',
+      'proxy',
+      invalid,
+    ]);
+
+    expect(process.exitCode).toBe(7);
+    const rendered = errorLog.mock.calls.flat().join(' ');
+    expect(rendered).toContain('invalid proxy URL');
+    expect(rendered).not.toContain('do-not-leak');
+  });
+
+  it('wraps storage failures without exposing raw errors or stack traces', async () => {
+    configMocks.listConfig.mockImplementation(() => {
+      throw new Error('storage failed password=do-not-leak');
+    });
+    const errorLog = vi.spyOn(log, 'error').mockImplementation(() => {});
+    vi.spyOn(log, 'dim').mockImplementation(() => {});
+
+    await programForConfig().parseAsync(['node', 'stealth', 'config', 'list']);
+
+    expect(process.exitCode).toBe(1);
+    const rendered = errorLog.mock.calls.flat().join(' ');
+    expect(rendered).toContain('Failed to read global configuration');
+    expect(rendered).not.toContain('do-not-leak');
   });
 
   it('masks proxy userinfo in set confirmation output', async () => {

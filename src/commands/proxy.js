@@ -102,8 +102,11 @@ export function registerProxy(program) {
           if (result.ok) {
             log.success(`Proxy OK — IP: ${result.ip}, Latency: ${result.latency}ms`);
           } else {
-            log.error(`Proxy FAILED — ${result.error}`);
-            process.exitCode = 7;
+            reportProxyError(
+              new ProxyError(url, new Error(result.error)),
+              'test',
+              url,
+            );
           }
         } else {
           const size = poolSize();
@@ -124,13 +127,21 @@ export function registerProxy(program) {
               log.success(`${r.proxy} — IP: ${r.ip}, ${r.latency}ms`);
             } else {
               fail++;
-              log.error(`${r.proxy} — ${r.error}`);
+              log.dim(`${r.proxy} — failed`);
             }
           }
 
           console.log();
           log.info(`Results: ${chalk.green(`${ok} ok`)} / ${chalk.red(`${fail} failed`)} / ${size} total`);
-          if (fail > 0) process.exitCode = 7;
+          if (fail > 0) {
+            reportProxyError(
+              new ProxyError(null, new Error(`${fail} proxy tests failed`), {
+                message: `${fail} of ${size} proxy tests failed`,
+                hint: 'Review the failed proxy entries and retry: stealth proxy test',
+              }),
+              'test',
+            );
+          }
         }
       } catch (err) {
         reportProxyError(err, 'test', url);

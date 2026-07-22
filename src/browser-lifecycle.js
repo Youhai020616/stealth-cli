@@ -252,7 +252,17 @@ export function createBrowserLifecycle(handle, opts = {}) {
     }
   };
 
+  const pageIsOpen = (page) => {
+    if (!page) return false;
+    try {
+      return typeof page.isClosed !== 'function' || !page.isClosed();
+    } catch {
+      return false;
+    }
+  };
+
   const updateLastKnownUrl = (page) => {
+    if (page !== handle.page && pageIsOpen(handle.page)) return;
     try {
       const url = page.url();
       if (url && url !== 'about:blank' && handle._meta) {
@@ -263,13 +273,7 @@ export function createBrowserLifecycle(handle, opts = {}) {
 
   const getOpenPages = () => {
     try {
-      return context.pages().filter((page) => {
-        try {
-          return typeof page.isClosed !== 'function' || !page.isClosed();
-        } catch {
-          return false;
-        }
-      });
+      return context.pages().filter(pageIsOpen);
     } catch {
       return [];
     }
@@ -300,6 +304,8 @@ export function createBrowserLifecycle(handle, opts = {}) {
       removeListener(page, 'close', onClose);
       removeListener(page, 'framenavigated', onFrameNavigated);
       pageListeners.delete(page);
+      const preferredPage = pageIsOpen(handle.page) ? handle.page : getOpenPages()[0];
+      if (preferredPage) updateLastKnownUrl(preferredPage);
       checkForLastPage();
     };
 

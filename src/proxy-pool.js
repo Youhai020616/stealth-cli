@@ -12,10 +12,56 @@ import {
   readPrivateFile,
   writeJsonAtomic,
 } from './utils/json-file.js';
-import { maskProxyUrl, parseProxyUrl, toPlaywrightProxy } from './utils/proxy.js';
+import {
+  isValidProxyUrl,
+  maskProxyUrl,
+  parseProxyUrl,
+  toPlaywrightProxy,
+} from './utils/proxy.js';
 
 const STEALTH_DIR = path.join(os.homedir(), '.stealth');
 const PROXIES_FILE = path.join(STEALTH_DIR, 'proxies.json');
+
+function invalidProxyPool(cause) {
+  return new ProxyError(null, cause, {
+    message: 'Proxy pool has an invalid format',
+    hint: `Fix or remove the proxy pool file: ${PROXIES_FILE}`,
+  });
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function isValidProxyRecord(proxy) {
+  return Boolean(
+    isPlainObject(proxy)
+    && isValidProxyUrl(proxy.url)
+    && (proxy.label === null || typeof proxy.label === 'string')
+    && (proxy.region === null || typeof proxy.region === 'string')
+    && typeof proxy.addedAt === 'string'
+    && (proxy.lastUsed === null || typeof proxy.lastUsed === 'string')
+    && Number.isInteger(proxy.useCount)
+    && proxy.useCount >= 0
+    && (proxy.lastStatus === null || proxy.lastStatus === 'ok' || proxy.lastStatus === 'fail')
+    && (proxy.lastLatency === null || (Number.isFinite(proxy.lastLatency) && proxy.lastLatency >= 0))
+    && Number.isInteger(proxy.failCount)
+    && proxy.failCount >= 0
+  );
+}
+
+function validateProxyPool(data) {
+  if (
+    !isPlainObject(data)
+    || !Array.isArray(data.proxies)
+    || !data.proxies.every(isValidProxyRecord)
+    || !Number.isInteger(data.lastRotateIndex)
+    || data.lastRotateIndex < 0
+  ) {
+    throw invalidProxyPool(new Error('Invalid persisted proxy pool data'));
+  }
+  return data;
+}
 
 function ensureDir() {
   ensurePrivateDirectory(STEALTH_DIR);
@@ -23,17 +69,26 @@ function ensureDir() {
 
 function loadData() {
   ensureDir();
+  let contents;
   try {
-    return JSON.parse(readPrivateFile(PROXIES_FILE, { encoding: 'utf8' }));
+    contents = readPrivateFile(PROXIES_FILE, { encoding: 'utf8' });
   } catch (error) {
     if (error.code === 'ENOENT') return { proxies: [], lastRotateIndex: 0 };
     throw error;
   }
+
+  let data;
+  try {
+    data = JSON.parse(contents);
+  } catch (cause) {
+    throw invalidProxyPool(cause);
+  }
+  return validateProxyPool(data);
 }
 
 function saveData(data) {
   ensureDir();
-  writeJsonAtomic(PROXIES_FILE, data);
+  writeJsonAtomic(PROXIES_FILE, validateProxyPool(data));
 }
 
 /**

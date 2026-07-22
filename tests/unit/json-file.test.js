@@ -163,6 +163,82 @@ describe('writeJsonAtomic', () => {
     }
   });
 
+  it('retains failed temp cleanup and drains it before a retry creates another artifact', () => {
+    const filePath = temporaryFile();
+    const openSync = fs.openSync.bind(fs);
+    const fsyncSync = fs.fsyncSync.bind(fs);
+    const closeSync = fs.closeSync.bind(fs);
+    const unlinkSync = fs.unlinkSync.bind(fs);
+    let tempDescriptor;
+    let tempPath;
+    let tempOpenCount = 0;
+
+    vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
+      const descriptor = openSync(target, ...args);
+      if (typeof target === 'string' && target.endsWith('.tmp')) {
+        tempDescriptor = descriptor;
+        tempPath = target;
+        tempOpenCount += 1;
+      }
+      return descriptor;
+    });
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
+      if (descriptor === tempDescriptor) {
+        const error = new Error('temp fsync failed');
+        error.code = 'EIO';
+        throw error;
+      }
+      return fsyncSync(descriptor);
+    });
+    vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+      if (descriptor === tempDescriptor) {
+        const error = new Error('temp close failed');
+        error.code = 'EIO';
+        throw error;
+      }
+      return closeSync(descriptor);
+    });
+    vi.spyOn(fs, 'unlinkSync').mockImplementation((target) => {
+      if (target === tempPath) {
+        const error = new Error('temp unlink failed');
+        error.code = 'EIO';
+        throw error;
+      }
+      return unlinkSync(target);
+    });
+
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 1 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.message).toContain('temp fsync failed');
+    expect(failure?.cleanupFailures).toHaveLength(2);
+    expect(failure?.cleanupOutcome).toEqual(expect.objectContaining({
+      status: 'pending',
+      destination: filePath,
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({ operation: 'close', path: tempPath }),
+        expect.objectContaining({ operation: 'remove', path: tempPath }),
+      ]),
+    }));
+    expect(Object.getOwnPropertyDescriptor(failure, 'cleanupFailures')?.enumerable).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(failure, 'cleanupOutcome')?.enumerable).toBe(false);
+    expect(fs.existsSync(tempPath)).toBe(true);
+    expect(tempOpenCount).toBe(1);
+
+    expect(() => writeJsonAtomic(filePath, { version: 2 }))
+      .toThrow('cleanup is incomplete');
+    expect(tempOpenCount).toBe(1);
+
+    vi.restoreAllMocks();
+    expect(() => writeJsonAtomic(filePath, { version: 3 })).not.toThrow();
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 3 });
+    expect(fs.readdirSync(path.dirname(filePath))).toEqual(['state.json']);
+  });
+
   it('should preserve the previous file when replacement serialization fails', () => {
     const filePath = temporaryFile();
     writeJsonAtomic(filePath, { version: 1 });

@@ -213,7 +213,12 @@ function validateOpenedJournal(descriptor, journalPath) {
   return identity;
 }
 
-function openJournal(target, { create, readOnly = false, allowAbsent = false }) {
+function openJournal(target, {
+  create,
+  readOnly = false,
+  allowAbsent = false,
+  retainOpened,
+}) {
   const journalPath = lockPath(target);
   let descriptor;
   let created = false;
@@ -243,9 +248,16 @@ function openJournal(target, { create, readOnly = false, allowAbsent = false }) 
   }
 
   if (descriptor !== undefined) {
+    const failedOpened = {
+      descriptor,
+      identity: null,
+      journalPath,
+      created,
+    };
     try {
-      fs.closeSync(descriptor);
+      closeOpenedJournal(failedOpened);
     } catch (closeError) {
+      if (typeof retainOpened === 'function') retainOpened(failedOpened);
       attachStateCleanupFailures(failure, [cleanupEntry(target, closeError)]);
     }
   }
@@ -576,6 +588,7 @@ function inspectDetachedJournalPath(record, opts = {}) {
       create: false,
       readOnly: true,
       allowAbsent: true,
+      retainOpened: opts.retainOpened,
     });
 
     if (!currentOpened) {

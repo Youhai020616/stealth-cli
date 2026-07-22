@@ -6,7 +6,9 @@
 
 import path from 'path';
 import os from 'os';
+import { ProxyError, StealthError } from './errors.js';
 import { readPrivateFile, writeJsonAtomic } from './utils/json-file.js';
+import { isValidProxyUrl } from './utils/proxy.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.stealth');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
@@ -26,6 +28,45 @@ const DEFAULTS = {
 };
 
 const VALID_KEYS = Object.keys(DEFAULTS);
+
+function invalidConfig(message, cause) {
+  return new StealthError(message, {
+    code: 1,
+    hint: `Fix or remove the configuration file: ${CONFIG_FILE}`,
+    cause,
+  });
+}
+
+function invalidConfigProxy(value, cause = new Error('Invalid proxy URL format')) {
+  return new ProxyError(value, cause, {
+    message: 'Global configuration contains an invalid proxy URL',
+    hint: 'Use an HTTP(S) proxy in the form [http://][user:password@]host[:port], or delete the proxy setting',
+  });
+}
+
+function validateConfig(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw invalidConfig('Global configuration file has an invalid format');
+  }
+
+  for (const key of VALID_KEYS) {
+    if (!Object.hasOwn(config, key)) continue;
+    const value = config[key];
+    if (key === 'proxy') {
+      if (value !== null && !isValidProxyUrl(value)) throw invalidConfigProxy(value);
+      continue;
+    }
+
+    const expected = typeof DEFAULTS[key];
+    if (
+      typeof value !== expected
+      || (expected === 'number' && !Number.isFinite(value))
+    ) {
+      throw invalidConfig(`Global configuration field "${key}" has an invalid type`);
+    }
+  }
+  return config;
+}
 
 /**
  * Load config (merges file with defaults)
@@ -47,18 +88,20 @@ function readConfigFile() {
     throw error;
   }
 
+  let config;
   try {
-    return JSON.parse(contents);
-  } catch {
-    return {};
+    config = JSON.parse(contents);
+  } catch (cause) {
+    throw invalidConfig('Global configuration file contains malformed JSON', cause);
   }
+  return validateConfig(config);
 }
 
 /**
  * Write config file
  */
 function writeConfigFile(config) {
-  writeJsonAtomic(CONFIG_FILE, config);
+  writeJsonAtomic(CONFIG_FILE, validateConfig(config));
 }
 
 /**
@@ -88,6 +131,9 @@ export function setConfigValue(key, value) {
     if (isNaN(value)) throw new Error(`Invalid number for ${key}`);
   } else if (value === 'null' || value === '') {
     value = null;
+  }
+  if (key === 'proxy' && value !== null && !isValidProxyUrl(value)) {
+    throw invalidConfigProxy(value);
   }
 
   config[key] = value;

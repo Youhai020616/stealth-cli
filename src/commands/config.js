@@ -7,12 +7,24 @@ import {
   getConfigValue, setConfigValue, deleteConfigValue,
   listConfig, resetConfig, CONFIG_FILE,
 } from '../config.js';
+import { StealthError, handleError } from '../errors.js';
 import { log } from '../output.js';
 import { maskProxyUrl } from '../utils/proxy.js';
 
 function configValueForDisplay(key, value) {
   if (key === 'proxy' && value !== null) return maskProxyUrl(value);
   return value;
+}
+
+function reportConfigError(error, operation) {
+  const configError = error instanceof StealthError
+    ? error
+    : new StealthError(`Failed to ${operation} global configuration`, {
+      code: 1,
+      hint: `Check ownership, permissions, and contents for: ${CONFIG_FILE}`,
+      cause: error,
+    });
+  process.exitCode = handleError(configError, { log, exit: false });
 }
 
 export function registerConfig(program) {
@@ -25,19 +37,23 @@ export function registerConfig(program) {
     .command('list')
     .description('Show all config values')
     .action(() => {
-      const items = listConfig();
-      console.log(chalk.bold('\n  Configuration:\n'));
-      console.log(chalk.dim(`  ${'Key'.padEnd(20)} ${'Value'.padEnd(25)} Source`));
-      console.log(chalk.dim('  ' + '─'.repeat(55)));
+      try {
+        const items = listConfig();
+        console.log(chalk.bold('\n  Configuration:\n'));
+        console.log(chalk.dim(`  ${'Key'.padEnd(20)} ${'Value'.padEnd(25)} Source`));
+        console.log(chalk.dim('  ' + '─'.repeat(55)));
 
-      for (const item of items) {
-        const displayValue = configValueForDisplay(item.key, item.value);
-        const val = displayValue === null ? chalk.dim('null') : String(displayValue);
-        const src = item.source === 'user' ? chalk.cyan('user') : chalk.dim('default');
-        console.log(`  ${item.key.padEnd(20)} ${val.padEnd(25)} ${src}`);
+        for (const item of items) {
+          const displayValue = configValueForDisplay(item.key, item.value);
+          const val = displayValue === null ? chalk.dim('null') : String(displayValue);
+          const src = item.source === 'user' ? chalk.cyan('user') : chalk.dim('default');
+          console.log(`  ${item.key.padEnd(20)} ${val.padEnd(25)} ${src}`);
+        }
+
+        console.log(chalk.dim(`\n  File: ${CONFIG_FILE}\n`));
+      } catch (error) {
+        reportConfigError(error, 'read');
       }
-
-      console.log(chalk.dim(`\n  File: ${CONFIG_FILE}\n`));
     });
 
   // stealth config get <key>
@@ -49,9 +65,8 @@ export function registerConfig(program) {
       try {
         const value = getConfigValue(key);
         console.log(configValueForDisplay(key, value));
-      } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+      } catch (error) {
+        reportConfigError(error, 'read');
       }
     });
 
@@ -65,9 +80,8 @@ export function registerConfig(program) {
       try {
         const result = setConfigValue(key, value);
         log.success(`${key} = ${configValueForDisplay(key, result)}`);
-      } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+      } catch (error) {
+        reportConfigError(error, 'update');
       }
     });
 
@@ -77,8 +91,12 @@ export function registerConfig(program) {
     .description('Reset a config value to default')
     .argument('<key>', 'Config key')
     .action((key) => {
-      deleteConfigValue(key);
-      log.success(`${key} reset to default`);
+      try {
+        deleteConfigValue(key);
+        log.success(`${key} reset to default`);
+      } catch (error) {
+        reportConfigError(error, 'update');
+      }
     });
 
   // stealth config reset
@@ -86,7 +104,11 @@ export function registerConfig(program) {
     .command('reset')
     .description('Reset all config to defaults')
     .action(() => {
-      resetConfig();
-      log.success('All config reset to defaults');
+      try {
+        resetConfig();
+        log.success('All config reset to defaults');
+      } catch (error) {
+        reportConfigError(error, 'reset');
+      }
     });
 }

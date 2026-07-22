@@ -208,6 +208,29 @@ describe('browser lifecycle', () => {
     expect(result.reason).toBe('last-page-closed');
   });
 
+  it('should keep the primary URL canonical until the primary page closes', async () => {
+    const harness = createHarness();
+    harness.lifecycle.start();
+    const popup = new MockPage('https://auth.example/callback?code=expired');
+    harness.context.addPage(popup);
+    popup.currentUrl = 'https://auth.example/callback?code=updated';
+    popup.emit('framenavigated', popup);
+
+    expect(harness.handle._meta.lastKnownUrl).toBe('https://example.com');
+    popup.closePage();
+    expect(harness.handle._meta.lastKnownUrl).toBe('https://example.com');
+
+    const remaining = new MockPage('https://example.com/authenticated');
+    harness.context.addPage(remaining);
+    harness.page.closePage();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(harness.lifecycle.phase).toBe('running');
+    expect(harness.handle._meta.lastKnownUrl).toBe('https://example.com/authenticated');
+    remaining.closePage();
+    await harness.lifecycle.wait();
+  });
+
   it('should track pages created after lifecycle startup', async () => {
     const harness = createHarness();
     harness.lifecycle.start();

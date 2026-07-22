@@ -727,6 +727,46 @@ describe('state lock journals', () => {
     successor();
   });
 
+  it('retains a pre-validation inspection descriptor when its internal close fails', () => {
+    const lease = acquireStateLocks({ profile: 'inspection-validation-close' });
+    const journalPath = stateLockPath('profile', 'inspection-validation-close');
+    const displacedPath = `${journalPath}.displaced`;
+    const claimContents = fs.readFileSync(journalPath, 'utf8');
+    fs.renameSync(journalPath, displacedPath);
+    fs.writeFileSync(journalPath, claimContents, { mode: 0o644 });
+    const openSync = fs.openSync.bind(fs);
+    const closeSync = fs.closeSync.bind(fs);
+    let inspectionDescriptor;
+    let inspectionOpenCount = 0;
+
+    vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
+      const descriptor = openSync(target, ...args);
+      if (target === journalPath) {
+        inspectionDescriptor = descriptor;
+        inspectionOpenCount += 1;
+      }
+      return descriptor;
+    });
+    vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+      if (descriptor === inspectionDescriptor) {
+        const error = new Error('pre-validation inspection close failed');
+        error.code = 'EIO';
+        throw error;
+      }
+      return closeSync(descriptor);
+    });
+
+    expect(() => lease()).toThrow('could not be inspected safely');
+    expect(inspectionOpenCount).toBe(1);
+    expect(() => lease()).toThrow('pre-validation inspection close failed');
+    expect(inspectionOpenCount).toBe(1);
+    expect(lease.owns('profile', 'inspection-validation-close')).toBe(false);
+
+    vi.restoreAllMocks();
+    fs.rmSync(journalPath);
+    expect(() => lease()).not.toThrow();
+  });
+
   it('fails cleanup when a replacement journal retains the current active claim', () => {
     const lease = acquireStateLocks({ profile: 'copied' });
     const journalPath = stateLockPath('profile', 'copied');

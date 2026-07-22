@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
+const PENDING_JSON_CLEANUPS = new Map();
 const PRIVATE_READ_FLAGS = (
   fs.constants.O_RDONLY
   | (fs.constants.O_NOFOLLOW || 0)
@@ -248,6 +249,108 @@ function hasFileIdentity(stats, identity) {
   return stats.dev === identity.device && stats.ino === identity.inode;
 }
 
+function cleanupFailure(operation, artifactPath, cause) {
+  const error = new Error(
+    `Failed to ${operation} sensitive JSON artifact: ${artifactPath}`,
+    { cause },
+  );
+  error.code = 'EJSONCLEANUP';
+  return error;
+}
+
+function cleanupResource(resource) {
+  if (resource.kind === 'descriptor') {
+    try {
+      fs.closeSync(resource.descriptor);
+    } catch (error) {
+      if (error.code !== 'EBADF') throw error;
+    }
+    return;
+  }
+
+  const current = fs.lstatSync(resource.artifactPath, { throwIfNoEntry: false });
+  if (!current) return;
+  if (
+    !current.isFile()
+    || current.isSymbolicLink()
+    || !hasFileIdentity(current, resource.identity)
+  ) {
+    throw replacedPathError(resource.artifactPath);
+  }
+  assertCurrentOwner(current, resource.artifactPath);
+  fs.unlinkSync(resource.artifactPath);
+}
+
+function attachJsonCleanupFailures(error, filePath, failures) {
+  if (failures.length === 0) return;
+  const existing = Array.isArray(error.cleanupFailures) ? error.cleanupFailures : [];
+  Object.defineProperty(error, 'cleanupFailures', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: [...existing, ...failures],
+  });
+  Object.defineProperty(error, 'cleanupOutcome', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: {
+      status: 'pending',
+      destination: path.resolve(filePath),
+      artifacts: failures.map(({ operation, artifactPath, error: failure }) => ({
+        operation,
+        path: artifactPath,
+        code: failure.code,
+      })),
+    },
+  });
+}
+
+function retainJsonCleanup(filePath, resource) {
+  const key = path.resolve(filePath);
+  const pending = PENDING_JSON_CLEANUPS.get(key) || [];
+  pending.push(resource);
+  PENDING_JSON_CLEANUPS.set(key, pending);
+}
+
+function attemptJsonCleanup(filePath, resource, failures) {
+  const operation = resource.kind === 'descriptor' ? 'close' : 'remove';
+  try {
+    cleanupResource(resource);
+    return true;
+  } catch (cause) {
+    const error = cleanupFailure(operation, resource.artifactPath, cause);
+    failures.push({
+      target: `sensitive-json:${resource.artifactPath}`,
+      operation,
+      artifactPath: resource.artifactPath,
+      error,
+    });
+    return false;
+  }
+}
+
+function drainPendingJsonCleanup(filePath) {
+  const key = path.resolve(filePath);
+  const pending = PENDING_JSON_CLEANUPS.get(key);
+  if (!pending || pending.length === 0) return;
+
+  const failures = [];
+  const remaining = [];
+  for (const resource of pending) {
+    if (!attemptJsonCleanup(filePath, resource, failures)) remaining.push(resource);
+  }
+
+  if (remaining.length === 0) PENDING_JSON_CLEANUPS.delete(key);
+  else PENDING_JSON_CLEANUPS.set(key, remaining);
+  if (failures.length > 0) {
+    const error = new Error(`Sensitive JSON cleanup is incomplete for: ${filePath}`);
+    error.code = 'EJSONCLEANUP';
+    attachJsonCleanupFailures(error, filePath, failures);
+    throw error;
+  }
+}
+
 function rollbackPublishedWrite(filePath, previousContents, replacementIdentity, mode) {
   const directory = path.dirname(filePath);
   const rollbackPath = path.join(
@@ -258,6 +361,8 @@ function rollbackPublishedWrite(filePath, previousContents, replacementIdentity,
   let rollbackIdentity;
   let rollbackTempExists = false;
   let destination = 'replacement';
+  const cleanupFailures = [];
+  const cleanupResources = [];
 
   try {
     const current = fs.lstatSync(filePath, { throwIfNoEntry: false });
@@ -287,9 +392,8 @@ function rollbackPublishedWrite(filePath, previousContents, replacementIdentity,
       assertCurrentOwner(rollbackStats, rollbackPath);
       fs.writeFileSync(rollbackDescriptor, previousContents);
       fs.fsyncSync(rollbackDescriptor);
-      const closingDescriptor = rollbackDescriptor;
+      fs.closeSync(rollbackDescriptor);
       rollbackDescriptor = undefined;
-      fs.closeSync(closingDescriptor);
       ensurePrivateFile(rollbackPath, mode, rollbackIdentity);
       fs.renameSync(rollbackPath, filePath);
       rollbackTempExists = false;
@@ -301,19 +405,40 @@ function rollbackPublishedWrite(filePath, previousContents, replacementIdentity,
     }
 
     syncDirectory(directory);
-    return { status: 'succeeded', destination };
+    return {
+      status: 'succeeded',
+      destination,
+      cleanupFailures,
+      cleanupResources,
+    };
   } catch (error) {
     if (rollbackDescriptor !== undefined) {
-      try {
-        fs.closeSync(rollbackDescriptor);
-      } catch {}
+      const resource = {
+        kind: 'descriptor',
+        descriptor: rollbackDescriptor,
+        artifactPath: rollbackPath,
+      };
+      if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
+        cleanupResources.push(resource);
+      }
     }
-    if (rollbackTempExists) {
-      try {
-        fs.unlinkSync(rollbackPath);
-      } catch {}
+    if (rollbackTempExists && rollbackIdentity) {
+      const resource = {
+        kind: 'path',
+        artifactPath: rollbackPath,
+        identity: rollbackIdentity,
+      };
+      if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
+        cleanupResources.push(resource);
+      }
     }
-    return { status: 'failed', destination, error };
+    return {
+      status: 'failed',
+      destination,
+      error,
+      cleanupFailures,
+      cleanupResources,
+    };
   }
 }
 
@@ -330,6 +455,9 @@ function attachCommitOutcome(error, previousContents, rollback) {
     };
     error.rollbackError = rollback.error;
   }
+  rollbackDetails.cleanup = rollback.cleanupFailures.length > 0
+    ? { status: 'pending', artifacts: rollback.cleanupFailures.length }
+    : { status: 'complete', artifacts: 0 };
 
   error.commitOutcome = {
     status: rollback.status === 'succeeded' ? 'rolled-back' : 'uncertain',
@@ -356,6 +484,7 @@ function attachCommitOutcome(error, previousContents, rollback) {
 export function writeJsonAtomic(filePath, value, opts = {}) {
   const { mode = 0o600 } = opts;
   const directory = path.dirname(filePath);
+  drainPendingJsonCleanup(filePath);
   const tempPath = path.join(
     directory,
     `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
@@ -391,10 +520,18 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
     ensurePrivateFile(filePath, mode, replacementIdentity);
     syncDirectory(directory);
   } catch (error) {
+    const cleanupFailures = [];
+    const cleanupResources = [];
+
     if (fileDescriptor !== undefined) {
-      try {
-        fs.closeSync(fileDescriptor);
-      } catch {}
+      const resource = {
+        kind: 'descriptor',
+        descriptor: fileDescriptor,
+        artifactPath: tempPath,
+      };
+      if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
+        cleanupResources.push(resource);
+      }
     }
     if (published) {
       const rollback = rollbackPublishedWrite(
@@ -404,10 +541,22 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
         mode,
       );
       attachCommitOutcome(error, previousContents, rollback);
+      cleanupFailures.push(...rollback.cleanupFailures);
+      cleanupResources.push(...rollback.cleanupResources);
     }
-    try {
-      fs.unlinkSync(tempPath);
-    } catch {}
+    if (replacementIdentity) {
+      const resource = {
+        kind: 'path',
+        artifactPath: tempPath,
+        identity: replacementIdentity,
+      };
+      if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
+        cleanupResources.push(resource);
+      }
+    }
+
+    for (const resource of cleanupResources) retainJsonCleanup(filePath, resource);
+    attachJsonCleanupFailures(error, filePath, cleanupFailures);
     throw error;
   }
 }
