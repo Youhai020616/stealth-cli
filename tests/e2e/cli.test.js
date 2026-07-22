@@ -69,6 +69,34 @@ describe('CLI integration', () => {
     expect(stderr).toContain('not found');
   });
 
+  it('should sanitize malformed global config errors at the top-level boundary', () => {
+    const home = fs.mkdtempSync(path.join(TEST_STEALTH_HOME, 'malformed-config-home-'));
+    const configDirectory = path.join(home, '.stealth');
+    const username = 'cli-config-user';
+    const password = 'cli-config-password';
+    fs.mkdirSync(configDirectory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      path.join(configDirectory, 'config.json'),
+      `{"proxy":"http://${username}:${password}@proxy.example:8080",\n`,
+      { mode: 0o600 },
+    );
+
+    const result = run(['browse', 'https://example.com'], {
+      env: { HOME: home },
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('Global configuration file contains malformed JSON');
+    expect(result.stderr).toContain('Hint: Fix or remove the configuration file');
+    expect(result.stderr).not.toMatch(/\n\s*at\s/u);
+    expect(result.stderr).not.toContain('SyntaxError');
+    expect(result.stderr).not.toContain('file://');
+    expect(result.stderr).not.toContain('[cause]');
+    expect(result.stderr).not.toContain(username);
+    expect(result.stderr).not.toContain(password);
+  });
+
   it('should show version', () => {
     const { stdout } = run(['--version']);
     expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);

@@ -27,6 +27,8 @@ import { registerFingerprint } from '../src/commands/fingerprint.js';
 import { registerServe } from '../src/commands/serve.js';
 import { registerMcp } from '../src/commands/mcp.js';
 import { registerConfig } from '../src/commands/config.js';
+import { handleError } from '../src/errors.js';
+import { log } from '../src/output.js';
 
 program
   .name('stealth')
@@ -54,4 +56,8 @@ registerProfile(program);
 registerProxy(program);
 registerConfig(program);
 
-await program.parseAsync();
+try {
+  await program.parseAsync();
+} catch (error) {
+  process.exitCode = handleError(error, { log, exit: false });
+}

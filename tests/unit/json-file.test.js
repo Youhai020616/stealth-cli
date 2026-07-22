@@ -1,3 +1,4 @@
+import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -10,6 +11,7 @@ import {
 } from '../../src/utils/json-file.js';
 
 const temporaryDirectories = [];
+const JSON_FILE_MODULE = new URL('../../src/utils/json-file.js', import.meta.url).href;
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -239,6 +241,69 @@ describe('writeJsonAtomic', () => {
     expect(fs.readdirSync(path.dirname(filePath))).toEqual(['state.json']);
   });
 
+  it('fails closed in a new process while a durable temp artifact remains', () => {
+    const filePath = temporaryFile();
+    const directory = path.dirname(filePath);
+    const artifactPath = path.join(
+      directory,
+      '.state.json.999999.11111111-1111-4111-8111-111111111111.tmp',
+    );
+    writeJsonAtomic(filePath, { version: 1 });
+    fs.writeFileSync(artifactPath, '{"pending":true}\n', { mode: 0o600 });
+
+    const script = `
+      import { writeJsonAtomic } from ${JSON.stringify(JSON_FILE_MODULE)};
+
+      try {
+        writeJsonAtomic(process.env.TEST_JSON_PATH, { version: 2 });
+        process.stdout.write('unexpected success');
+      } catch (error) {
+        process.stderr.write(JSON.stringify({
+          message: error.message,
+          code: error.code,
+          cleanupOutcome: error.cleanupOutcome,
+          cleanupOutcomeEnumerable: Object.prototype.propertyIsEnumerable.call(
+            error,
+            'cleanupOutcome',
+          ),
+        }));
+        process.exitCode = 23;
+      }
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        TEST_JSON_PATH: filePath,
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.status).toBe(23);
+    expect(result.stdout).toBe('');
+    const failure = JSON.parse(result.stderr);
+    expect(failure.message).toContain('cleanup is incomplete');
+    expect(failure.message).toContain(artifactPath);
+    expect(failure.code).toBe('EJSONCLEANUP');
+    expect(failure.cleanupOutcomeEnumerable).toBe(false);
+    expect(failure.cleanupOutcome).toEqual({
+      status: 'pending',
+      destination: filePath,
+      artifacts: [{
+        operation: 'inspect',
+        path: artifactPath,
+        code: 'EJSONARTIFACTPENDING',
+      }],
+    });
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 1 });
+    expect(fs.readFileSync(artifactPath, 'utf8')).toBe('{"pending":true}\n');
+    expect(fs.readdirSync(directory).sort()).toEqual([
+      path.basename(artifactPath),
+      'state.json',
+    ].sort());
+  });
+
   it('should preserve the previous file when replacement serialization fails', () => {
     const filePath = temporaryFile();
     writeJsonAtomic(filePath, { version: 1 });
@@ -251,6 +316,44 @@ describe('writeJsonAtomic', () => {
   });
 
   const posixIt = process.platform === 'win32' ? it.skip : it;
+
+  posixIt('fails closed without following or removing a durable artifact symlink', () => {
+    const filePath = temporaryFile();
+    const directory = path.dirname(filePath);
+    const targetPath = path.join(directory, 'unrelated.json');
+    const artifactPath = path.join(
+      directory,
+      '.state.json.999999.22222222-2222-4222-8222-222222222222.rollback',
+    );
+    writeJsonAtomic(filePath, { version: 1 });
+    fs.writeFileSync(targetPath, '{"untouched":true}\n', { mode: 0o600 });
+    fs.symlinkSync(targetPath, artifactPath);
+
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 2 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.code).toBe('EJSONCLEANUP');
+    expect(failure?.message).toContain(artifactPath);
+    expect(failure?.cleanupOutcome).toEqual({
+      status: 'pending',
+      destination: filePath,
+      artifacts: [{
+        operation: 'inspect',
+        path: artifactPath,
+        code: 'EUNSAFESTATEPATH',
+      }],
+    });
+    expect(Object.getOwnPropertyDescriptor(failure, 'cleanupOutcome')?.enumerable).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(failure, 'artifactErrors')?.enumerable).toBe(false);
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 1 });
+    expect(fs.readFileSync(targetPath, 'utf8')).toBe('{"untouched":true}\n');
+    expect(fs.lstatSync(artifactPath).isSymbolicLink()).toBe(true);
+  });
+
   posixIt('rejects a symbolic-link destination without changing its target', () => {
     const directory = temporaryDirectory();
     const targetPath = path.join(directory, 'outside.json');

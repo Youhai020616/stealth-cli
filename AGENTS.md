@@ -61,6 +61,7 @@ tests/
 - SDK `closeBrowser()` is best-effort by default; `{ strict: true }` throws after cleanup. Later calls retry unfinished resource/lease cleanup but never recapture persistence. CLI commands surface close-time persistence failures with a non-zero exit status
 - All browser launch goes through `camoufox-js` `launchOptions()` → `playwright-core` `firefox.launch()`. Never use `chromium.launch()` or `playwright` (non-core)
 - `STEALTH_HOME` overrides profile, session, and lock storage; config, proxy-pool, and daemon paths still use `~/.stealth`. Profile/session/config/proxy JSON uses owner-only POSIX storage; mode bits are not enforceable on Windows, so Windows users must protect sensitive paths with ACLs
+- Atomic JSON writers fail closed on strict destination-scoped `.tmp`/`.rollback` artifacts left by any process. Never auto-remove cross-process artifacts; verify ownership and remove only the exact owner-only path reported to the user
 - Daemon socket: `~/.stealth/daemon.sock`, PID: `~/.stealth/daemon.pid`
 
 ## camoufox-js API (DO NOT GUESS)

@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D20-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-378%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-381%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -397,6 +397,8 @@ Use `checkpointBrowserState(handle)` for manual mid-run persistence on a handle 
 
 A successful `result.persistence.snapshot` can contain cookie values and the raw last URL, and error objects retain non-enumerable diagnostic fields such as `.cause` or `.url`. Do not log, serialize, or return browser handles or raw close results across trust boundaries. Store `STEALTH_HOME` as sensitive authentication state. Error `toJSON()` output is redacted for routine logging, but the in-memory objects must still be treated as sensitive.
 
+Atomic state writes also fail closed when a prior process leaves a destination-scoped `.tmp` or `.rollback` artifact. stealth-cli never auto-removes cross-process artifacts: verify that no live process owns the artifact, inspect it, and remove only the exact owner-only path reported by the command before retrying.
+
 ---
 
 ## Error Handling
@@ -438,8 +440,8 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 ```
 Version:     0.6.1
 Commands:    17
-Tests:       378 passing (29 test files)
-Source:      11,246 lines (49 JavaScript files under `src/`)
+Tests:       381 passing (29 test files)
+Source:      11,324 lines (49 JavaScript files under `src/`)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)

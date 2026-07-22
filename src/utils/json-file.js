@@ -351,6 +351,81 @@ function drainPendingJsonCleanup(filePath) {
   }
 }
 
+function escapeRegularExpression(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function durableJsonArtifactPattern(filePath) {
+  const basename = escapeRegularExpression(path.basename(filePath));
+  return new RegExp(
+    `^\\.${basename}\\.\\d+\\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\\.(?:tmp|rollback)$`,
+    'u',
+  );
+}
+
+function assertNoDurableJsonArtifacts(filePath, mode) {
+  const directory = path.dirname(filePath);
+  const pattern = durableJsonArtifactPattern(filePath);
+  const artifactNames = fs.readdirSync(directory)
+    .filter((name) => pattern.test(name))
+    .sort();
+  const findings = [];
+
+  for (const name of artifactNames) {
+    const artifactPath = path.join(directory, name);
+    let validationError = null;
+    try {
+      const stats = fs.lstatSync(artifactPath, { throwIfNoEntry: false });
+      if (!stats) continue;
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw unsafePathError(artifactPath, 'a regular file');
+      }
+      assertCurrentOwner(stats, artifactPath);
+      if (process.platform !== 'win32' && (stats.mode & 0o777) !== mode) {
+        throw insecurePermissionsError(artifactPath, mode, stats.mode & 0o777);
+      }
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      validationError = error;
+    }
+    findings.push({ artifactPath, validationError });
+  }
+
+  if (findings.length === 0) return;
+
+  const artifactPaths = findings.map(({ artifactPath }) => artifactPath);
+  const error = new Error(
+    `Sensitive JSON cleanup is incomplete; inspect these exact owner-only artifacts before retrying: ${artifactPaths.join(', ')}`,
+  );
+  error.code = 'EJSONCLEANUP';
+  Object.defineProperty(error, 'cleanupOutcome', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: {
+      status: 'pending',
+      destination: path.resolve(filePath),
+      artifacts: findings.map(({ artifactPath, validationError }) => ({
+        operation: 'inspect',
+        path: artifactPath,
+        code: validationError?.code || 'EJSONARTIFACTPENDING',
+      })),
+    },
+  });
+  Object.defineProperty(error, 'artifactErrors', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: findings
+      .filter(({ validationError }) => validationError)
+      .map(({ artifactPath, validationError }) => ({
+        path: artifactPath,
+        error: validationError,
+      })),
+  });
+  throw error;
+}
+
 function rollbackPublishedWrite(filePath, previousContents, replacementIdentity, mode) {
   const directory = path.dirname(filePath);
   const rollbackPath = path.join(
@@ -471,7 +546,9 @@ function attachCommitOutcome(error, previousContents, rollback) {
  * Atomically write sensitive JSON data with owner-only permissions.
  *
  * The temporary file is created in the destination directory so publication
- * remains atomic on the same filesystem. Failures before publication leave the
+ * remains atomic on the same filesystem. Before creating it, destination-scoped
+ * artifacts from incomplete writes in any process block publication until the
+ * caller verifies the exact reported path. Failures before publication leave the
  * destination unchanged. Post-publication validation or directory-sync failures
  * trigger an atomic rollback to the prior bytes (or prior absence) and still
  * throw; an uncertain rollback is described on error.commitOutcome.
@@ -485,12 +562,13 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
   const { mode = 0o600 } = opts;
   const directory = path.dirname(filePath);
   drainPendingJsonCleanup(filePath);
+  ensurePrivateDirectory(directory);
+  assertNoDurableJsonArtifacts(filePath, mode);
+
   const tempPath = path.join(
     directory,
     `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
   );
-
-  ensurePrivateDirectory(directory);
   let previousContents = null;
   try {
     previousContents = readPrivateFile(filePath, { mode });
