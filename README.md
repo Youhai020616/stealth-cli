@@ -440,7 +440,7 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 ## Project Stats
 
 ```text
-Version:     0.6.1
+Version:     0.7.0
 Commands:    17
 Tests:       432 passing (29 test files)
 Source:      12,226 lines (49 JavaScript files under `src/`)

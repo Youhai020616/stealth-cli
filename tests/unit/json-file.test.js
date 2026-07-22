@@ -22,7 +22,9 @@ afterEach(() => {
 });
 
 function temporaryDirectory() {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-json-'));
+  const directory = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-json-')),
+  );
   temporaryDirectories.push(directory);
   return directory;
 }

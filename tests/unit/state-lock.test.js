@@ -14,7 +14,9 @@ import {
 import { getStateLocksDir, getStealthHome } from '../../src/utils/storage-paths.js';
 
 const ORIGINAL_STEALTH_HOME = process.env.STEALTH_HOME;
-const TEST_STEALTH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-state-lock-'));
+const TEST_STEALTH_HOME = fs.realpathSync.native(
+  fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-state-lock-')),
+);
 const EXTRA_TEST_HOMES = new Set();
 const SPAWNED_CHILDREN = new Set();
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
@@ -114,7 +116,9 @@ function activeClaims(records) {
 }
 
 function temporaryStealthHome(label) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `stealth-state-lock-${label}-`));
+  const root = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), `stealth-state-lock-${label}-`)),
+  );
   EXTRA_TEST_HOMES.add(root);
   return root;
 }
