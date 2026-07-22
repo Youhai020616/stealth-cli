@@ -184,6 +184,29 @@ describe('browser lifecycle', () => {
     expect(result.reason).toBe('last-page-closed');
   });
 
+  it('should detach closed popup listeners immediately and ignore repeated close events', async () => {
+    const harness = createHarness();
+    const popup = new MockPage('https://example.com/popup');
+    harness.lifecycle.start();
+    harness.context.addPage(popup);
+
+    expect(popup.listenerCount('close')).toBe(1);
+    expect(popup.listenerCount('framenavigated')).toBe(1);
+
+    popup.closePage();
+    expect(popup.listenerCount('close')).toBe(0);
+    expect(popup.listenerCount('framenavigated')).toBe(0);
+
+    popup.emit('close');
+    popup.emit('framenavigated', popup);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(harness.lifecycle.phase).toBe('running');
+
+    harness.page.closePage();
+    const result = await harness.lifecycle.wait();
+    expect(result.reason).toBe('last-page-closed');
+  });
+
   it('should track pages created after lifecycle startup', async () => {
     const harness = createHarness();
     harness.lifecycle.start();

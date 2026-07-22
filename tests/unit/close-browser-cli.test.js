@@ -25,7 +25,7 @@ afterAll(() => {
 });
 
 describe('closeBrowserForCli', () => {
-  it('sets exit code 8 when authentication state persistence fails', async () => {
+  it('reports persistence failures and sets exit code 8', async () => {
     closeBrowser.mockResolvedValue({
       persistence: null,
       persistenceError: Object.assign(new Error('disk full'), { code: 8 }),
@@ -35,6 +35,7 @@ describe('closeBrowserForCli', () => {
     await closeBrowserForCli({ isDaemon: false }, { log: logger });
 
     expect(process.exitCode).toBe(8);
+    expect(logger.warn).toHaveBeenCalledWith('Browser state was not fully saved: disk full');
   });
 
   it('sets a general failure and reports incomplete cleanup', async () => {

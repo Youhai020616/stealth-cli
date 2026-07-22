@@ -5,7 +5,6 @@
 import { InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import {
-  closeBrowser,
   launchBrowser,
   navigate,
   waitForReady,
@@ -15,8 +14,9 @@ import {
   createLaunchSignalGuard,
   DEFAULT_CHECKPOINT_INTERVAL,
 } from '../browser-lifecycle.js';
-import { StealthError, handleError } from '../errors.js';
+import { StealthError, handleError, safeUrlForDisplay } from '../errors.js';
 import { log } from '../output.js';
+import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 
 const MIN_CHECKPOINT_INTERVAL = 250;
@@ -29,19 +29,13 @@ export function parseCheckpointInterval(value) {
     interval < MIN_CHECKPOINT_INTERVAL ||
     interval > MAX_CHECKPOINT_INTERVAL
   ) {
-    throw new InvalidArgumentError(
+    const error = new InvalidArgumentError(
       `checkpoint interval must be an integer from ${MIN_CHECKPOINT_INTERVAL} to ${MAX_CHECKPOINT_INTERVAL}`,
     );
+    error.exitCode = 2;
+    throw error;
   }
   return interval;
-}
-
-function describeTargetUrl(value) {
-  try {
-    return new URL(value).origin;
-  } catch {
-    return 'requested URL';
-  }
 }
 
 function reportLifecycleResult(result, hasPersistenceTarget) {
@@ -128,7 +122,7 @@ export async function runOpen(positionalUrl, opts) {
 
     if (targetUrl && lifecycle.phase === 'running') {
       try {
-        spinner.text = `Opening ${describeTargetUrl(targetUrl)}...`;
+        spinner.text = `Opening ${safeUrlForDisplay(targetUrl)}...`;
         await navigate(handle, targetUrl);
         if (lifecycle.phase === 'running') {
           await waitForReady(handle.page);
@@ -168,11 +162,7 @@ export async function runOpen(positionalUrl, opts) {
         }
       }
     } else if (handle) {
-      const cleanup = await closeBrowser(handle);
-      if (cleanup.cleanupErrors.length > 0) {
-        const targets = cleanup.cleanupErrors.map(({ target }) => target).join(', ');
-        log.warn(`Browser cleanup after launch failure was incomplete (${targets})`);
-      }
+      await closeBrowserForCli(handle, { log });
     }
 
     if (pendingSignal && !lifecycle) {

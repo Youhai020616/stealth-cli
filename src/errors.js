@@ -14,6 +14,15 @@
  *   130 — interrupted (SIGINT)
  */
 
+export function safeUrlForDisplay(value, fallback = 'requested URL') {
+  try {
+    const origin = new URL(value).origin;
+    return origin && origin !== 'null' ? origin : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export class StealthError extends Error {
   constructor(message, opts = {}) {
     super(message);
@@ -35,12 +44,27 @@ export class BrowserLaunchError extends StealthError {
     super(message, { code: 3, ...opts });
     this.name = 'BrowserLaunchError';
     this.hint = opts.hint || 'Try: npx camoufox-js fetch (re-download browser)';
+    this.cleanupFailures = opts.cleanupFailures || [];
+    this.cleanupError = opts.cleanupError || null;
+  }
+}
+
+export class BrowserCleanupError extends StealthError {
+  constructor(message = 'Browser cleanup failed', opts = {}) {
+    super(message, {
+      code: 1,
+      hint: opts.hint || 'Retry closing the browser before reusing its profile or session',
+      ...opts,
+    });
+    this.name = 'BrowserCleanupError';
+    this.failures = opts.failures || [];
+    this.cleanupFailures = this.failures;
   }
 }
 
 export class NavigationError extends StealthError {
   constructor(url, cause) {
-    const msg = `Failed to navigate to ${url}`;
+    const msg = `Failed to navigate to ${safeUrlForDisplay(url)}`;
     let hint = 'Check the URL and your network connection';
     if (cause?.message?.toLowerCase().includes('timeout')) {
       hint = 'Page load timed out. Try --wait <ms> or --retries <n>';

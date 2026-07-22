@@ -29,27 +29,76 @@ import {
 } from "./utils/browser-factory.js";
 import { log } from "./output.js";
 import {
+  BrowserCleanupError,
   BrowserLaunchError,
   NavigationError,
   PersistenceError,
   ProfileError,
+  safeUrlForDisplay,
 } from "./errors.js";
 import { buildA11yTree, clickByRef, typeByRef, hoverByRef } from "./a11y.js";
 import { acquireStateLocks } from "./utils/state-lock.js";
+import { assertStateName } from "./utils/storage-paths.js";
 
-const closeOperations = new WeakMap();
+const closeStates = new WeakMap();
+
+function isNonBlankUrl(value) {
+  return typeof value === 'string' && value.length > 0 && value !== 'about:blank';
+}
+
+function trackLastKnownUrl(handle, value) {
+  if (isNonBlankUrl(value) && handle?._meta) {
+    handle._meta.lastKnownUrl = value;
+  }
+}
+
+function configuredStateTargets(meta = {}) {
+  const targets = [];
+  if (meta.profileName) targets.push({ kind: 'profile', name: meta.profileName });
+  if (meta.sessionName) targets.push({ kind: 'session', name: meta.sessionName });
+  return targets;
+}
+
+function requireOwningStateLease(handle) {
+  const targets = configuredStateTargets(handle?._meta);
+  const stateLease = handle?._meta?.stateLease;
+  const unowned = targets.filter(({ kind, name }) => {
+    try {
+      return (
+        typeof stateLease !== 'function' ||
+        typeof stateLease.owns !== 'function' ||
+        !stateLease.owns(kind, name)
+      );
+    } catch {
+      return true;
+    }
+  });
+
+  if (unowned.length > 0) {
+    const names = unowned.map(({ kind, name }) => `${kind} "${name}"`).join(', ');
+    throw new PersistenceError(`Cannot save browser state without an active lease for ${names}`, {
+      failures: unowned.map(({ kind, name }) => ({ target: kind, name })),
+    });
+  }
+
+  return stateLease;
+}
+
+function attachCleanupFailures(error, cleanupFailures) {
+  if (cleanupFailures.length === 0) return error;
+
+  const cleanupError = new BrowserCleanupError('Browser launch rollback was incomplete', {
+    cause: cleanupFailures[0].error,
+    failures: cleanupFailures,
+  });
+  error.cleanupFailures = cleanupFailures;
+  error.cleanupError = cleanupError;
+  return error;
+}
 
 /**
  * Build proxy configuration
  */
-function describeUrlForLog(value) {
-  try {
-    return new URL(value).origin;
-  } catch {
-    return 'saved session URL';
-  }
-}
-
 function buildProxy(proxyStr) {
   if (!proxyStr) return null;
 
@@ -106,12 +155,15 @@ export async function launchBrowser(opts = {}) {
     restoreSessionUrl = true,
   } = opts;
 
+  profileName = profileName ? assertStateName(profileName, "Profile") : undefined;
+  sessionName = sessionName ? assertStateName(sessionName, "Session") : undefined;
+
   // A linked session carries its profile identity even when --profile is not
   // repeated. Re-read it after locking before trusting any mutable state.
   let sessionMetadata = sessionName ? getSession(sessionName) : null;
   if (!profileName && sessionMetadata?.profile) profileName = sessionMetadata.profile;
 
-  const releaseStateLocks = acquireStateLocks({
+  const stateLease = acquireStateLocks({
     profile: profileName,
     session: sessionName,
   });
@@ -139,7 +191,7 @@ export async function launchBrowser(opts = {}) {
       }
     }
 
-    if (profileName) touchProfile(profileName);
+    if (profileName) touchProfile(profileName, { lease: stateLease });
     if (proxyRotate && !proxyStr) proxyStr = getNextProxy();
 
     if (
@@ -150,7 +202,7 @@ export async function launchBrowser(opts = {}) {
       !sessionName &&
       isDaemonRunning()
     ) {
-      releaseStateLocks();
+      stateLease();
       return {
         browser: null,
         context: null,
@@ -227,15 +279,18 @@ export async function launchBrowser(opts = {}) {
         });
       } catch {
         log.warn(
-          `Session URL restore failed for ${describeUrlForLog(sessionInfo.lastUrl)}; continuing with a blank page`,
+          `Session URL restore failed for ${safeUrlForDisplay(sessionInfo.lastUrl, 'saved session URL')}; continuing with a blank page`,
         );
       }
     }
 
-    let lastKnownUrl = 'about:blank';
+    let pageUrl = null;
     try {
-      lastKnownUrl = page.url();
+      pageUrl = page.url();
     } catch {}
+    const lastKnownUrl = isNonBlankUrl(pageUrl)
+      ? pageUrl
+      : isNonBlankUrl(sessionInfo?.lastUrl) ? sessionInfo.lastUrl : pageUrl;
 
     return {
       browser,
@@ -248,22 +303,36 @@ export async function launchBrowser(opts = {}) {
         proxyUrl: proxyStr,
         sessionInfo,
         lastKnownUrl,
-        releaseStateLocks,
+        stateLease,
       },
     };
   } catch (error) {
-    if (context) await context.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
-    try {
-      releaseStateLocks();
-    } catch {}
-    if (error instanceof ProfileError || error instanceof BrowserLaunchError) throw error;
-    if (browser) {
-      throw new BrowserLaunchError(`Browser initialization failed: ${error.message}`, {
+    let primaryError = error;
+    if (!(error instanceof ProfileError || error instanceof BrowserLaunchError) && browser) {
+      primaryError = new BrowserLaunchError(`Browser initialization failed: ${error.message}`, {
         cause: error,
       });
     }
-    throw error;
+
+    const rollbackHandle = {
+      browser,
+      context,
+      page: null,
+      isDaemon: false,
+      _meta: { stateLease },
+    };
+    let cleanupFailures = [];
+    try {
+      let cleanup = await closeBrowser(rollbackHandle, { persist: false });
+      if (cleanup.cleanupErrors.some(({ target }) => target === 'state-lock')) {
+        cleanup = await closeBrowser(rollbackHandle, { persist: false });
+      }
+      cleanupFailures = cleanup.cleanupErrors;
+    } catch (cleanupError) {
+      cleanupFailures = [{ target: 'rollback', error: cleanupError }];
+    }
+
+    throw attachCleanupFailures(primaryError, cleanupFailures);
   }
 }
 
@@ -284,22 +353,29 @@ export async function captureBrowserState(handle) {
     throw new PersistenceError('Cannot capture state after the browser disconnected');
   }
 
-  let lastUrl = _meta?.lastKnownUrl || null;
-  const pages = typeof context.pages === 'function' ? context.pages() : [];
-  const candidates = [page, ...pages].filter(Boolean).reverse();
-  for (const candidate of candidates) {
+  let lastUrl = isNonBlankUrl(_meta?.lastKnownUrl) ? _meta.lastKnownUrl : null;
+  if (!lastUrl) {
+    let pages = [];
     try {
-      if (typeof candidate.isClosed === 'function' && candidate.isClosed()) continue;
-      const candidateUrl = candidate.url();
-      if (candidateUrl && candidateUrl !== 'about:blank') {
-        lastUrl = candidateUrl;
-        break;
-      }
-      if (!lastUrl && candidateUrl) lastUrl = candidateUrl;
+      pages = typeof context.pages === 'function' ? context.pages() : [];
     } catch {}
+    const candidates = [page, ...pages.filter((candidate) => candidate !== page)].filter(Boolean);
+    let blankFallback = _meta?.lastKnownUrl || null;
+    for (const candidate of candidates) {
+      try {
+        if (typeof candidate.isClosed === 'function' && candidate.isClosed()) continue;
+        const candidateUrl = candidate.url();
+        if (isNonBlankUrl(candidateUrl)) {
+          lastUrl = candidateUrl;
+          break;
+        }
+        if (!blankFallback && candidateUrl) blankFallback = candidateUrl;
+      } catch {}
+    }
+    if (!lastUrl) lastUrl = blankFallback;
   }
 
-  if (_meta && lastUrl) _meta.lastKnownUrl = lastUrl;
+  trackLastKnownUrl(handle, lastUrl);
 
   let cookies;
   try {
@@ -334,11 +410,13 @@ export async function writeBrowserStateSnapshot(handle, snapshot) {
     return { snapshot, results };
   }
 
+  const stateLease = requireOwningStateLease(handle);
+
   if (profileName) {
     try {
       results.profile = {
         name: profileName,
-        cookies: saveProfileCookies(profileName, snapshot.cookies),
+        cookies: saveProfileCookies(profileName, snapshot.cookies, { lease: stateLease }),
       };
     } catch (error) {
       failures.push({ target: 'profile', name: profileName, error });
@@ -349,6 +427,7 @@ export async function writeBrowserStateSnapshot(handle, snapshot) {
     try {
       const session = saveSessionSnapshot(sessionName, snapshot, {
         profile: profileName,
+        lease: stateLease,
       });
       results.session = {
         name: sessionName,
@@ -392,12 +471,107 @@ export async function persistBrowserState(handle) {
   return writeBrowserStateSnapshot(handle, snapshot);
 }
 
+function getCloseState(handle) {
+  let state = closeStates.get(handle);
+  if (!state) {
+    state = {
+      inFlight: null,
+      persistenceAttempted: false,
+      persistence: null,
+      persistenceError: null,
+      contextClosed: !handle.context,
+      browserClosed: !handle.browser,
+      stateLeaseReleased: typeof handle._meta?.stateLease !== 'function',
+    };
+    closeStates.set(handle, state);
+  }
+  return state;
+}
+
+function browserIsDisconnected(browser) {
+  try {
+    return typeof browser?.isConnected === 'function' && !browser.isConnected();
+  } catch {
+    return false;
+  }
+}
+
+function canReleaseStateLease(handle, state) {
+  return handle.browser ? state.browserClosed : state.contextClosed;
+}
+
+async function performCloseOperation(handle, state, persist) {
+  const { browser, context } = handle;
+  const cleanupErrors = [];
+  let contextCleanupError = null;
+
+  if (!state.persistenceAttempted) {
+    state.persistenceAttempted = true;
+    if (persist) {
+      try {
+        state.persistence = await persistBrowserState(handle);
+      } catch (error) {
+        state.persistenceError = error;
+      }
+    }
+  }
+
+  if (!state.contextClosed) {
+    try {
+      await context.close();
+      state.contextClosed = true;
+    } catch (error) {
+      contextCleanupError = { target: 'context', error };
+      cleanupErrors.push(contextCleanupError);
+    }
+  }
+
+  if (!state.browserClosed) {
+    try {
+      await browser.close();
+      state.browserClosed = true;
+    } catch (error) {
+      if (browserIsDisconnected(browser)) {
+        state.browserClosed = true;
+      } else {
+        cleanupErrors.push({ target: 'browser', error });
+      }
+    }
+  }
+
+  if (browser && state.browserClosed) {
+    state.contextClosed = true;
+    if (contextCleanupError) {
+      cleanupErrors.splice(cleanupErrors.indexOf(contextCleanupError), 1);
+    }
+  }
+
+  if (
+    !state.stateLeaseReleased &&
+    canReleaseStateLease(handle, state)
+  ) {
+    try {
+      await handle._meta.stateLease();
+      state.stateLeaseReleased = true;
+    } catch (error) {
+      cleanupErrors.push({ target: 'state-lock', error });
+    }
+  }
+
+  return {
+    persistence: state.persistence,
+    persistenceError: state.persistenceError,
+    cleanupErrors,
+  };
+}
+
 /**
- * Safely close a browser exactly once.
+ * Safely close a browser, coalescing concurrent calls while allowing later
+ * calls to retry resources whose cleanup did not complete.
  *
- * Persistence is best-effort by default for SDK compatibility. Callers that
- * need a strict guarantee should use persistBrowserState() first and then call
- * closeBrowser(handle, { persist: false }).
+ * Persistence is best-effort by default for SDK compatibility and is attempted
+ * at most once. Callers that need a strict guarantee should persist first and
+ * then call closeBrowser(handle, { persist: false }).
  *
  * @param {object} handle
  * @param {object} [opts]
@@ -411,55 +585,31 @@ export async function closeBrowser(handle, opts = {}) {
     return { persistence: null, persistenceError: null, cleanupErrors: [] };
   }
 
-  let closeOperation = closeOperations.get(handle);
-  if (!closeOperation) {
-    closeOperation = (async () => {
-      const { browser, context } = handle;
-      let persistence = null;
-      let persistenceError = null;
-      const cleanupErrors = [];
-
-      if (persist) {
-        try {
-          persistence = await persistBrowserState(handle);
-        } catch (error) {
-          persistenceError = error;
-          log.warn(`Browser state was not fully saved: ${error.message}`);
-        }
-      }
-
-      if (context) {
-        try {
-          await context.close();
-        } catch (error) {
-          cleanupErrors.push({ target: 'context', error });
-        }
-      }
-      if (browser) {
-        try {
-          await browser.close();
-        } catch (error) {
-          cleanupErrors.push({ target: 'browser', error });
-        }
-      }
-      if (handle._meta?.releaseStateLocks) {
-        try {
-          handle._meta.releaseStateLocks();
-        } catch (error) {
-          cleanupErrors.push({ target: 'state-lock', error });
-        }
-      }
-
-      return { persistence, persistenceError, cleanupErrors };
-    })();
-    closeOperations.set(handle, closeOperation);
+  const state = getCloseState(handle);
+  if (!state.inFlight) {
+    const operation = performCloseOperation(handle, state, persist);
+    state.inFlight = operation;
+    operation.then(
+      () => {
+        if (state.inFlight === operation) state.inFlight = null;
+      },
+      () => {
+        if (state.inFlight === operation) state.inFlight = null;
+      },
+    );
   }
 
-  const result = await closeOperation;
-  if (strict && result.persistenceError) throw result.persistenceError;
+  const result = await state.inFlight;
+  if (strict && result.persistenceError) {
+    if (result.cleanupErrors.length > 0) {
+      result.persistenceError.cleanupFailures = result.cleanupErrors;
+    }
+    throw result.persistenceError;
+  }
   if (strict && result.cleanupErrors.length > 0) {
-    throw new BrowserLaunchError('Browser cleanup failed', {
+    throw new BrowserCleanupError('Browser cleanup failed', {
       cause: result.cleanupErrors[0].error,
+      failures: result.cleanupErrors,
     });
   }
   return result;
@@ -491,7 +641,7 @@ export async function navigate(handle, url, opts = {}) {
         },
         { maxRetries: retries, label: `navigate(daemon)` },
       );
-      if (handle._meta) handle._meta.lastKnownUrl = result;
+      trackLastKnownUrl(handle, result);
       return result;
     }
 
@@ -499,6 +649,7 @@ export async function navigate(handle, url, opts = {}) {
       timeout,
       waitUntil,
       maxRetries: retries,
+      label: `navigate to ${safeUrlForDisplay(url)}`,
     });
 
     // Human behavior after navigation
@@ -506,7 +657,7 @@ export async function navigate(handle, url, opts = {}) {
       await postNavigationBehavior(handle.page);
     }
 
-    if (handle._meta) handle._meta.lastKnownUrl = finalUrl;
+    trackLastKnownUrl(handle, finalUrl);
     return finalUrl;
   } catch (err) {
     if (err instanceof NavigationError) throw err;

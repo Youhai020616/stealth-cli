@@ -53,9 +53,10 @@ tests/
 - **Two modes**: Direct mode (new browser per command) vs Daemon mode (reuse background browser via unix socket HTTP server)
 - `browser.js` detects daemon automatically; headed, stateful, proxied, or `forceDirect` launches always bypass it
 - `open` and direct `interactive` own SIGINT/SIGTERM/SIGHUP handling so state is checkpointed before shutdown
-- Named profile/session browser state is single-writer and remains locked until `closeBrowser()` releases the handle
-- A session-only launch restores its linked profile; invalid state names or a missing linked profile fail before browser launch
-- SDK `closeBrowser()` remains best-effort, while CLI commands surface close-time persistence failures with a non-zero exit status
+- Named profile/session browser state is lowercase-canonical and single-writer; browser lifetimes and standalone mutations use the same lease protocol
+- State locks fail closed after crashes and are never auto-removed; users must verify ownership before removing the exact stale lock path reported by the CLI
+- A session-only launch restores its linked profile; invalid state names, malformed state, or a missing linked profile fail before browser launch
+- SDK `closeBrowser()` remains best-effort and retryable for incomplete cleanup, while CLI commands surface close-time persistence failures with a non-zero exit status
 - All browser launch goes through `camoufox-js` `launchOptions()` → `playwright-core` `firefox.launch()`. Never use `chromium.launch()` or `playwright` (non-core)
 - `STEALTH_HOME` overrides profile, session, and lock storage; config, proxy-pool, and daemon paths still use `~/.stealth`
 - Daemon socket: `~/.stealth/daemon.sock`, PID: `~/.stealth/daemon.pid`
@@ -86,7 +87,7 @@ const browser = await firefox.launch(options);
 Custom error hierarchy in `src/errors.js`. Exit codes:
 - 0=success, 1=general, 2=args, 3=browser launch, 4=navigation, 5=extraction, 6=timeout, 7=proxy, 8=profile/session/persistence error
 - All errors extend `StealthError` with `.code`, `.hint`, `.format()`
-- Use specific error classes: `BrowserLaunchError`, `NavigationError`, `ExtractionError`, `TimeoutError`, `ProxyError`, `ProfileError`, `PersistenceError`, `BlockedError`
+- Use specific error classes: `BrowserLaunchError`, `BrowserCleanupError`, `NavigationError`, `ExtractionError`, `TimeoutError`, `ProxyError`, `ProfileError`, `PersistenceError`, `BlockedError`
 - `handleError(err)` prints message + hint and calls `process.exit(code)`
 
 ## Coding Conventions

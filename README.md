@@ -255,11 +255,11 @@ stealth open https://other.com --session my-task
 
 When `--profile` and `--session` are combined, the profile is the canonical cookie source and the session restores URL/history metadata. A session already linked to a different profile is rejected instead of merging two identities. When only `--session` is supplied, a linked profile is restored automatically. For `open` and `interactive`, an explicit initial URL takes precedence: stealth-cli skips the saved session URL before navigating to the requested URL.
 
-> **Behavior/security change:** Profile and session names may contain only ASCII letters, numbers, underscores, and hyphens (`[A-Za-z0-9_-]+`). If a session links to a profile that no longer exists, startup fails before the browser launches instead of silently falling back to a different identity.
+> **Behavior/security change:** Profile and session names may contain only ASCII letters, numbers, underscores, and hyphens (`[A-Za-z0-9_-]+`) and are stored as lowercase canonical names. Existing mixed-case filenames are resolved case-insensitively; if an older release sanitized a name such as `work.prod`, use the basename shown by `stealth profile list` or `stealth session list` (for example, `work_prod`). If a session links to a profile that no longer exists, startup fails before the browser launches instead of silently falling back to a different identity.
 
-Named profile and session browser state is single-writer. A browser holds a lock for each named profile or session until close, so another browser cannot use the same state concurrently. Profile and session JSON files contain authentication material; writes are atomic, directories use owner-only permissions (`0700`), and files use `0600` on supported platforms.
+Named profile and session browser state is single-writer. Browser lifetimes and standalone create/save/delete operations all participate in the same lock protocol, so concurrent mutation fails instead of mixing identities. Lock files are never removed automatically after a crash: when the recorded owner is no longer running, stealth-cli prints the exact lock path and requires explicit removal after you confirm no process still owns that state. Profile and session JSON files contain authentication material; writes are atomic, directories use owner-only permissions (`0700`), and files use `0600` on supported POSIX platforms.
 
-By default, profiles, sessions, and their locks live under `~/.stealth`. Set `STEALTH_HOME` to relocate those paths together. Configuration (`config.json`), proxy-pool (`proxies.json`), and daemon socket/PID paths remain under `~/.stealth` in the current source. A hard browser crash can only preserve state captured by the most recent checkpoint; `open` defaults to a one-second interval.
+By default, profiles, sessions, and their locks live under `~/.stealth`. Set `STEALTH_HOME` to relocate those paths together. The configured state root and child paths must not be symlinks. Configuration (`config.json`), proxy-pool (`proxies.json`), and daemon socket/PID paths remain under `~/.stealth` in the current source. A hard browser crash can only preserve state captured by the most recent checkpoint; `open` defaults to a one-second interval.
 
 ### Proxy Pool
 
@@ -383,7 +383,7 @@ stealth-cli provides structured errors with contextual hints:
   Hint: Create with: stealth profile create work
 ```
 
-Exit codes: `0` success · `3` browser launch · `4` navigation/blocked · `5` extraction · `7` proxy · `8` profile/session/persistence
+Exit codes: `0` success · `1` general error · `2` invalid arguments · `3` browser launch · `4` navigation/blocked · `5` extraction · `6` timeout · `7` proxy · `8` profile/session/persistence
 
 ## Common Options
 

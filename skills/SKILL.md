@@ -194,9 +194,9 @@ stealth open --session my-task
 stealth open https://other.com --session my-task
 ```
 
-A session linked to a profile automatically restores that profile when only `--session` is supplied. For `open` and `interactive`, an explicit initial URL skips the session's saved URL before navigation. Profile and session names accept only letters, numbers, underscores, and hyphens; if a linked profile is missing, startup fails before browser launch instead of silently using another identity.
+A session linked to a profile automatically restores that profile when only `--session` is supplied. For `open` and `interactive`, an explicit initial URL skips the session's saved URL before navigation. Profile and session names accept only letters, numbers, underscores, and hyphens and are stored lowercase; use the canonical basename shown by list commands for state created by older versions. If a linked profile is missing or stored state is malformed, startup fails before browser launch instead of silently using another identity.
 
-Named profile and session browser state is single-writer: each lock is held until the browser closes, and concurrent reuse fails. `STEALTH_HOME` relocates profiles, sessions, and their locks from the default `~/.stealth`; config, proxy-pool, and daemon paths still use `~/.stealth` in the current source.
+Named profile and session browser state is single-writer: browser lifetimes and standalone mutations use the same lease protocol. Concurrent reuse fails. Crash-left locks are not auto-removed; verify that no process owns the state before removing the exact lock path printed by the CLI. `STEALTH_HOME` relocates profiles, sessions, and their locks from the default `~/.stealth`; its state paths must not be symlinks. Config, proxy-pool, and daemon paths still use `~/.stealth` in the current source.
 
 ### Proxy pool
 

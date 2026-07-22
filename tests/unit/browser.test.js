@@ -51,7 +51,7 @@ vi.mock('../../src/proxy-pool.js', () => ({
 }));
 
 vi.mock('../../src/utils/state-lock.js', () => ({
-  acquireStateLocks: vi.fn(() => vi.fn()),
+  acquireStateLocks: vi.fn(),
 }));
 
 // Now import the module under test
@@ -74,6 +74,16 @@ import { getNextProxy } from '../../src/proxy-pool.js';
 import { daemonNavigate, daemonRequest } from '../../src/client.js';
 import { log } from '../../src/output.js';
 import { acquireStateLocks } from '../../src/utils/state-lock.js';
+
+function createStateLease({ profile, session } = {}) {
+  const owned = new Set();
+  if (profile) owned.add(`profile:${profile}`);
+  if (session) owned.add(`session:${session}`);
+
+  const lease = vi.fn(() => owned.clear());
+  lease.owns = vi.fn((kind, name) => owned.has(`${kind}:${name}`));
+  return lease;
+}
 
 // Helper: create mock browser/context/page and wire up createBrowser
 function setupMockBrowser() {
@@ -107,12 +117,12 @@ describe('launchBrowser', () => {
       history: [],
       profile: null,
     });
-    acquireStateLocks.mockReset().mockImplementation(() => vi.fn());
+    acquireStateLocks.mockReset().mockImplementation((opts) => createStateLease(opts));
   });
 
   it('should return a daemon handle without retaining state locks', async () => {
-    const releaseStateLocks = vi.fn();
-    acquireStateLocks.mockReturnValue(releaseStateLocks);
+    const stateLease = createStateLease();
+    acquireStateLocks.mockReturnValue(stateLease);
     isDaemonRunning.mockReturnValue(true);
 
     const handle = await launchBrowser();
@@ -121,7 +131,7 @@ describe('launchBrowser', () => {
     expect(handle.browser).toBeNull();
     expect(handle.page).toBeNull();
     expect(createBrowser).not.toHaveBeenCalled();
-    expect(releaseStateLocks).toHaveBeenCalledOnce();
+    expect(stateLease).toHaveBeenCalledOnce();
   });
 
   it('should skip daemon for an explicitly headed browser', async () => {
@@ -178,7 +188,10 @@ describe('launchBrowser', () => {
 
     expect(handle.isDaemon).toBe(false);
     expect(loadProfile).toHaveBeenCalledWith('jp-desktop');
-    expect(touchProfile).toHaveBeenCalledWith('jp-desktop');
+    expect(touchProfile).toHaveBeenCalledWith('jp-desktop', {
+      lease: handle._meta.stateLease,
+    });
+    expect(handle._meta.stateLease.owns('profile', 'jp-desktop')).toBe(true);
     expect(createBrowser).toHaveBeenCalledWith(expect.objectContaining({ os: 'windows' }));
   });
 
@@ -225,7 +238,7 @@ describe('launchBrowser', () => {
     expect(handle._meta.profileName).toBe('work');
   });
 
-  it('should skip a saved session URL when the caller has an explicit target', async () => {
+  it('should preserve a saved session URL when an explicit target leaves the page blank', async () => {
     restoreSession.mockResolvedValue({
       lastUrl: 'https://saved.example/account',
       history: [],
@@ -233,9 +246,12 @@ describe('launchBrowser', () => {
     });
     const { mockPage } = setupMockBrowser();
 
-    await launchBrowser({ session: 'login', restoreSessionUrl: false });
+    const handle = await launchBrowser({ session: 'login', restoreSessionUrl: false });
+    const snapshot = await captureBrowserState(handle);
 
     expect(mockPage.goto).not.toHaveBeenCalled();
+    expect(handle._meta.lastKnownUrl).toBe('https://saved.example/account');
+    expect(snapshot.lastUrl).toBe('https://saved.example/account');
   });
 
   it('should redact query parameters when session URL restoration fails', async () => {
@@ -272,6 +288,26 @@ describe('launchBrowser', () => {
     })).rejects.toThrow('belongs to profile');
     expect(touchProfile).not.toHaveBeenCalled();
     expect(createBrowser).not.toHaveBeenCalled();
+  });
+
+  it('should canonicalize profile and session case before comparing linked state', async () => {
+    loadProfile.mockReturnValue({
+      fingerprint: { locale: 'en-US', timezone: 'UTC', viewport: { width: 1280, height: 720 }, os: 'macos' },
+      proxy: null,
+    });
+    getSession.mockReturnValue({ profile: 'work' });
+    restoreSession.mockResolvedValue({ lastUrl: null, history: [], profile: 'work' });
+    const { mockContext } = setupMockBrowser();
+
+    const handle = await launchBrowser({ profile: 'Work', session: 'Login' });
+
+    expect(acquireStateLocks).toHaveBeenCalledWith({ profile: 'work', session: 'login' });
+    expect(loadProfile).toHaveBeenCalledWith('work');
+    expect(restoreSession).toHaveBeenCalledWith('login', mockContext, {
+      expectedProfile: 'work',
+      restoreCookies: false,
+    });
+    expect(handle._meta).toMatchObject({ profileName: 'work', sessionName: 'login' });
   });
 
   it('should use profile cookies as canonical when profile and session are combined', async () => {
@@ -312,28 +348,28 @@ describe('launchBrowser', () => {
   });
 
   it('should release state locks when a profile fails before browser launch', async () => {
-    const releaseStateLocks = vi.fn();
-    acquireStateLocks.mockReturnValue(releaseStateLocks);
+    const stateLease = createStateLease({ profile: 'missing' });
+    acquireStateLocks.mockReturnValue(stateLease);
     loadProfile.mockImplementation(() => { throw new Error('Profile not found'); });
 
     await expect(launchBrowser({ profile: 'missing' })).rejects.toThrow('Profile not found');
 
-    expect(releaseStateLocks).toHaveBeenCalledOnce();
+    expect(stateLease).toHaveBeenCalledOnce();
   });
 
   it('should release state locks when browser creation fails', async () => {
-    const releaseStateLocks = vi.fn();
-    acquireStateLocks.mockReturnValue(releaseStateLocks);
+    const stateLease = createStateLease({ session: 'login' });
+    acquireStateLocks.mockReturnValue(stateLease);
     createBrowser.mockRejectedValue(new Error('launch failed'));
 
     await expect(launchBrowser({ session: 'login' })).rejects.toThrow('launch failed');
 
-    expect(releaseStateLocks).toHaveBeenCalledOnce();
+    expect(stateLease).toHaveBeenCalledOnce();
   });
 
   it('should clean up a partially initialized browser and release state locks', async () => {
-    const releaseStateLocks = vi.fn();
-    acquireStateLocks.mockReturnValue(releaseStateLocks);
+    const stateLease = createStateLease({ session: 'login' });
+    acquireStateLocks.mockReturnValue(stateLease);
     const mockBrowser = {
       newContext: vi.fn().mockRejectedValue(new Error('context failed')),
       close: vi.fn().mockResolvedValue(undefined),
@@ -342,7 +378,59 @@ describe('launchBrowser', () => {
 
     await expect(launchBrowser({ session: 'login' })).rejects.toThrow('Browser initialization failed');
     expect(mockBrowser.close).toHaveBeenCalledOnce();
-    expect(releaseStateLocks).toHaveBeenCalledOnce();
+    expect(stateLease).toHaveBeenCalledOnce();
+  });
+
+  it('should preserve the launch failure and retain ownership when rollback cannot close a connected browser', async () => {
+    const stateLease = createStateLease({ session: 'login' });
+    acquireStateLocks.mockReturnValue(stateLease);
+    const initializationError = new Error('context failed');
+    const cleanupError = new Error('browser still connected');
+    const mockBrowser = {
+      newContext: vi.fn().mockRejectedValue(initializationError),
+      close: vi.fn().mockRejectedValue(cleanupError),
+      isConnected: vi.fn(() => true),
+    };
+    createBrowser.mockResolvedValue(mockBrowser);
+
+    let failure;
+    try {
+      await launchBrowser({ session: 'login' });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'BrowserLaunchError',
+      cause: initializationError,
+      cleanupFailures: [expect.objectContaining({ target: 'browser', error: cleanupError })],
+      cleanupError: expect.objectContaining({ name: 'BrowserCleanupError' }),
+    });
+    expect(stateLease).not.toHaveBeenCalled();
+    expect(stateLease.owns('session', 'login')).toBe(true);
+  });
+
+  it('should retry a transient state-lease release during launch rollback', async () => {
+    const stateLease = createStateLease({ session: 'login' });
+    stateLease.mockImplementationOnce(() => {
+      throw new Error('lock directory busy');
+    });
+    acquireStateLocks.mockReturnValue(stateLease);
+    createBrowser.mockRejectedValue(new Error('launch failed'));
+
+    let failure;
+    try {
+      await launchBrowser({ session: 'login' });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'BrowserLaunchError',
+      cleanupFailures: [],
+    });
+    expect(stateLease).toHaveBeenCalledTimes(2);
+    expect(stateLease.owns('session', 'login')).toBe(false);
   });
 });
 
@@ -366,22 +454,25 @@ describe('browser state persistence', () => {
       cookies: vi.fn().mockResolvedValue(cookies),
       pages: vi.fn(() => [page]),
     };
+    const stateLease = createStateLease({ profile: 'work', session: 'login' });
     const handle = {
       isDaemon: false,
       browser: { isConnected: vi.fn(() => true) },
       context,
       page,
-      _meta: { profileName: 'work', sessionName: 'login' },
+      _meta: { profileName: 'work', sessionName: 'login', stateLease },
     };
 
     const result = await persistBrowserState(handle);
 
     expect(context.cookies).toHaveBeenCalledOnce();
-    expect(saveProfileCookies).toHaveBeenCalledWith('work', cookies);
+    expect(saveProfileCookies).toHaveBeenCalledWith('work', cookies, {
+      lease: stateLease,
+    });
     expect(saveSessionSnapshot).toHaveBeenCalledWith(
       'login',
       expect.objectContaining({ cookies, lastUrl: 'https://example.com' }),
-      { profile: 'work' },
+      { profile: 'work', lease: stateLease },
     );
     expect(result.results.profile.cookies).toBe(1);
   });
@@ -392,7 +483,10 @@ describe('browser state persistence', () => {
       browser: { isConnected: vi.fn(() => true) },
       context: { cookies: vi.fn().mockResolvedValue([]), pages: vi.fn(() => []) },
       page: null,
-      _meta: { profileName: 'work' },
+      _meta: {
+        profileName: 'work',
+        stateLease: createStateLease({ profile: 'work' }),
+      },
     };
     saveProfileCookies.mockReturnValue(0);
 
@@ -411,7 +505,11 @@ describe('browser state persistence', () => {
     };
     const handle = {
       isDaemon: false,
-      _meta: { profileName: 'work', sessionName: 'login' },
+      _meta: {
+        profileName: 'work',
+        sessionName: 'login',
+        stateLease: createStateLease({ profile: 'work', session: 'login' }),
+      },
     };
     saveProfileCookies.mockImplementation(() => { throw new Error('disk full'); });
 
@@ -432,6 +530,99 @@ describe('browser state persistence', () => {
     expect(JSON.stringify(persistenceError)).not.toContain('123');
     expect(saveSessionSnapshot).toHaveBeenCalledOnce();
   });
+
+  it('should reject all state writes before mutation when any configured lease is not owned', async () => {
+    const snapshot = {
+      cookies: [],
+      lastUrl: 'https://example.com',
+      capturedAt: new Date().toISOString(),
+    };
+    const handle = {
+      isDaemon: false,
+      _meta: {
+        profileName: 'work',
+        sessionName: 'login',
+        stateLease: createStateLease({ profile: 'work' }),
+      },
+    };
+
+    await expect(writeBrowserStateSnapshot(handle, snapshot)).rejects.toMatchObject({
+      name: 'PersistenceError',
+      message: expect.stringContaining('session "login"'),
+    });
+    expect(saveProfileCookies).not.toHaveBeenCalled();
+    expect(saveSessionSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('should reject a non-callable object that only spoofs lease ownership', async () => {
+    const snapshot = {
+      cookies: [],
+      lastUrl: 'https://example.com',
+      capturedAt: new Date().toISOString(),
+    };
+    const handle = {
+      isDaemon: false,
+      _meta: {
+        profileName: 'work',
+        stateLease: { owns: () => true },
+      },
+    };
+
+    await expect(writeBrowserStateSnapshot(handle, snapshot)).rejects.toMatchObject({
+      name: 'PersistenceError',
+      message: expect.stringContaining('profile "work"'),
+    });
+    expect(saveProfileCookies).not.toHaveBeenCalled();
+  });
+
+  it('should trust a lifecycle-tracked nonblank URL instead of popup ordering', async () => {
+    const primary = {
+      url: vi.fn(() => 'https://example.com/primary'),
+      isClosed: vi.fn(() => false),
+    };
+    const popup = {
+      url: vi.fn(() => 'https://example.com/popup'),
+      isClosed: vi.fn(() => false),
+    };
+    const pages = vi.fn(() => [primary, popup]);
+    const handle = {
+      isDaemon: false,
+      browser: { isConnected: vi.fn(() => true) },
+      context: { cookies: vi.fn().mockResolvedValue([]), pages },
+      page: primary,
+      _meta: { lastKnownUrl: 'https://example.com/lifecycle' },
+    };
+
+    const snapshot = await captureBrowserState(handle);
+
+    expect(snapshot.lastUrl).toBe('https://example.com/lifecycle');
+    expect(pages).not.toHaveBeenCalled();
+  });
+
+  it('should scan the primary page before popups when no tracked URL exists', async () => {
+    const primary = {
+      url: vi.fn(() => 'https://example.com/primary'),
+      isClosed: vi.fn(() => false),
+    };
+    const popup = {
+      url: vi.fn(() => 'https://example.com/popup'),
+      isClosed: vi.fn(() => false),
+    };
+    const handle = {
+      isDaemon: false,
+      browser: { isConnected: vi.fn(() => true) },
+      context: {
+        cookies: vi.fn().mockResolvedValue([]),
+        pages: vi.fn(() => [primary, popup]),
+      },
+      page: primary,
+      _meta: { lastKnownUrl: 'about:blank' },
+    };
+
+    const snapshot = await captureBrowserState(handle);
+
+    expect(snapshot.lastUrl).toBe('https://example.com/primary');
+  });
 });
 
 describe('closeBrowser', () => {
@@ -447,23 +638,23 @@ describe('closeBrowser', () => {
     await closeBrowser(handle);
   });
 
-  it('should close direct handles and release their state locks', async () => {
+  it('should close direct handles and release their state lease', async () => {
     const mockContext = { close: vi.fn().mockResolvedValue(undefined), cookies: vi.fn() };
     const mockBrowser = { close: vi.fn().mockResolvedValue(undefined) };
-    const releaseStateLocks = vi.fn();
+    const stateLease = createStateLease();
     const handle = {
       isDaemon: false,
       browser: mockBrowser,
       context: mockContext,
       page: { url: () => 'about:blank' },
-      _meta: { releaseStateLocks },
+      _meta: { stateLease },
     };
 
     await closeBrowser(handle);
 
     expect(mockContext.close).toHaveBeenCalled();
     expect(mockBrowser.close).toHaveBeenCalled();
-    expect(releaseStateLocks).toHaveBeenCalledOnce();
+    expect(stateLease).toHaveBeenCalledOnce();
   });
 
   it('should make concurrent close calls idempotent', async () => {
@@ -481,7 +672,10 @@ describe('closeBrowser', () => {
       browser: mockBrowser,
       context: mockContext,
       page: null,
-      _meta: { profileName: 'work' },
+      _meta: {
+        profileName: 'work',
+        stateLease: createStateLease({ profile: 'work' }),
+      },
     };
 
     await Promise.all([closeBrowser(handle), closeBrowser(handle)]);
@@ -506,14 +700,20 @@ describe('closeBrowser', () => {
       browser: mockBrowser,
       context: mockContext,
       page: null,
-      _meta: { profileName: 'work' },
+      _meta: {
+        profileName: 'work',
+        stateLease: createStateLease({ profile: 'work' }),
+      },
     };
 
+    const warning = vi.spyOn(log, 'warn').mockImplementation(() => {});
     const result = await closeBrowser(handle);
 
     expect(result.persistenceError?.name).toBe('PersistenceError');
     expect(mockContext.close).toHaveBeenCalledOnce();
     expect(mockBrowser.close).toHaveBeenCalledOnce();
+    expect(warning).not.toHaveBeenCalled();
+    warning.mockRestore();
   });
 
   it('should skip persistence when requested by a lifecycle coordinator', async () => {
@@ -527,13 +727,172 @@ describe('closeBrowser', () => {
       browser: mockBrowser,
       context: mockContext,
       page: null,
-      _meta: { profileName: 'work' },
+      _meta: {
+        profileName: 'work',
+        stateLease: createStateLease({ profile: 'work' }),
+      },
     };
 
     await closeBrowser(handle, { persist: false });
 
     expect(mockContext.cookies).not.toHaveBeenCalled();
     expect(mockContext.close).toHaveBeenCalledOnce();
+  });
+
+  it('should retry incomplete context and browser cleanup after transient failures', async () => {
+    let connected = true;
+    const mockContext = {
+      close: vi.fn()
+        .mockRejectedValueOnce(new Error('context busy'))
+        .mockResolvedValue(undefined),
+      cookies: vi.fn().mockResolvedValue([]),
+      pages: vi.fn(() => []),
+    };
+    const mockBrowser = {
+      isConnected: vi.fn(() => connected),
+      close: vi.fn()
+        .mockRejectedValueOnce(new Error('browser busy'))
+        .mockImplementationOnce(async () => {
+          connected = false;
+        }),
+    };
+    const stateLease = createStateLease({ profile: 'work' });
+    const handle = {
+      isDaemon: false,
+      browser: mockBrowser,
+      context: mockContext,
+      page: null,
+      _meta: { profileName: 'work', stateLease },
+    };
+
+    const first = await closeBrowser(handle);
+    expect(first.cleanupErrors.map(({ target }) => target)).toEqual(['context', 'browser']);
+    expect(stateLease).not.toHaveBeenCalled();
+
+    const second = await closeBrowser(handle);
+    expect(second.cleanupErrors).toEqual([]);
+    expect(mockContext.close).toHaveBeenCalledTimes(2);
+    expect(mockBrowser.close).toHaveBeenCalledTimes(2);
+    expect(mockContext.cookies).toHaveBeenCalledOnce();
+    expect(saveProfileCookies).toHaveBeenCalledOnce();
+    expect(stateLease).toHaveBeenCalledOnce();
+  });
+
+  it('should retry an incomplete browser close before releasing the state lease', async () => {
+    let connected = true;
+    const mockContext = {
+      close: vi.fn().mockResolvedValue(undefined),
+      cookies: vi.fn().mockResolvedValue([]),
+      pages: vi.fn(() => []),
+    };
+    const mockBrowser = {
+      isConnected: vi.fn(() => connected),
+      close: vi.fn()
+        .mockRejectedValueOnce(new Error('browser busy'))
+        .mockImplementationOnce(async () => {
+          connected = false;
+        }),
+    };
+    const stateLease = createStateLease({ profile: 'work' });
+    const handle = {
+      isDaemon: false,
+      browser: mockBrowser,
+      context: mockContext,
+      page: null,
+      _meta: { profileName: 'work', stateLease },
+    };
+
+    const first = await closeBrowser(handle);
+    expect(first.cleanupErrors.map(({ target }) => target)).toEqual(['browser']);
+    expect(stateLease).not.toHaveBeenCalled();
+    expect(stateLease.owns('profile', 'work')).toBe(true);
+
+    const second = await closeBrowser(handle);
+    expect(second.cleanupErrors).toEqual([]);
+    expect(mockContext.close).toHaveBeenCalledOnce();
+    expect(mockBrowser.close).toHaveBeenCalledTimes(2);
+    expect(mockContext.cookies).toHaveBeenCalledOnce();
+    expect(saveProfileCookies).toHaveBeenCalledOnce();
+    expect(stateLease).toHaveBeenCalledOnce();
+  });
+
+  it('should treat confirmed browser disconnection as completed cleanup', async () => {
+    const stateLease = createStateLease({ profile: 'work' });
+    const handle = {
+      isDaemon: false,
+      browser: {
+        close: vi.fn().mockRejectedValue(new Error('already disconnected')),
+        isConnected: vi.fn(() => false),
+      },
+      context: {
+        close: vi.fn().mockRejectedValue(new Error('context already closed')),
+      },
+      page: null,
+      _meta: { profileName: 'work', stateLease },
+    };
+
+    const result = await closeBrowser(handle, { persist: false });
+
+    expect(result.cleanupErrors).toEqual([]);
+    expect(stateLease).toHaveBeenCalledOnce();
+  });
+
+  it('should retry only a transient state-lease release failure', async () => {
+    const mockContext = {
+      close: vi.fn().mockResolvedValue(undefined),
+      cookies: vi.fn().mockResolvedValue([]),
+      pages: vi.fn(() => []),
+    };
+    const mockBrowser = { close: vi.fn().mockResolvedValue(undefined) };
+    const stateLease = createStateLease({ profile: 'work' });
+    stateLease.mockImplementationOnce(() => {
+      throw new Error('lock directory busy');
+    });
+    const handle = {
+      isDaemon: false,
+      browser: mockBrowser,
+      context: mockContext,
+      page: null,
+      _meta: { profileName: 'work', stateLease },
+    };
+
+    const first = await closeBrowser(handle);
+    const second = await closeBrowser(handle);
+
+    expect(first.cleanupErrors.map(({ target }) => target)).toEqual(['state-lock']);
+    expect(second.cleanupErrors).toEqual([]);
+    expect(mockContext.close).toHaveBeenCalledOnce();
+    expect(mockBrowser.close).toHaveBeenCalledOnce();
+    expect(mockContext.cookies).toHaveBeenCalledOnce();
+    expect(saveProfileCookies).toHaveBeenCalledOnce();
+    expect(stateLease).toHaveBeenCalledTimes(2);
+  });
+
+  it('should use a cleanup-specific error in strict mode', async () => {
+    const handle = {
+      isDaemon: false,
+      browser: {
+        close: vi.fn().mockRejectedValue(new Error('browser busy')),
+        isConnected: vi.fn(() => true),
+      },
+      context: { close: vi.fn().mockResolvedValue(undefined) },
+      page: null,
+      _meta: {},
+    };
+
+    let failure;
+    try {
+      await closeBrowser(handle, { persist: false, strict: true });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'BrowserCleanupError',
+      code: 1,
+      failures: [expect.objectContaining({ target: 'browser' })],
+    });
+    expect(failure.hint).not.toContain('camoufox-js fetch');
   });
 });
 
@@ -555,11 +914,64 @@ describe('navigate', () => {
       goto: vi.fn().mockResolvedValue(undefined),
       url: vi.fn().mockReturnValue('https://example.com/'),
     };
-    const handle = { isDaemon: false, page: mockPage };
+    const handle = {
+      isDaemon: false,
+      page: mockPage,
+      _meta: { lastKnownUrl: 'https://saved.example/account' },
+    };
 
     const result = await navigate(handle, 'https://example.com');
 
     expect(mockPage.goto).toHaveBeenCalled();
+    expect(result).toBe('https://example.com/');
+    expect(handle._meta.lastKnownUrl).toBe('https://example.com/');
+  });
+
+  it('should keep the saved URL when a successful navigation still reports about:blank', async () => {
+    const mockPage = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn().mockReturnValue('about:blank'),
+    };
+    const handle = {
+      isDaemon: false,
+      page: mockPage,
+      _meta: { lastKnownUrl: 'https://saved.example/account' },
+    };
+
+    await navigate(handle, 'about:blank');
+
+    expect(handle._meta.lastKnownUrl).toBe('https://saved.example/account');
+  });
+
+  it('should redact credentials, paths, queries, and fragments from navigation failures', async () => {
+    const rawUrl = 'https://user:password@example.com/callback?code=secret#token';
+    const mockPage = {
+      goto: vi.fn().mockRejectedValue(new Error(`page.goto failed for ${rawUrl}`)),
+      url: vi.fn(() => 'https://saved.example/account'),
+    };
+    const handle = {
+      isDaemon: false,
+      page: mockPage,
+      _meta: { lastKnownUrl: 'https://saved.example/account' },
+    };
+
+    let failure;
+    try {
+      await navigate(handle, rawUrl, { retries: 0 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'NavigationError',
+      url: rawUrl,
+      message: 'Failed to navigate to https://example.com',
+    });
+    expect(failure.format()).not.toContain('password');
+    expect(failure.format()).not.toContain('callback');
+    expect(failure.format()).not.toContain('secret');
+    expect(failure.format()).not.toContain('token');
+    expect(handle._meta.lastKnownUrl).toBe('https://saved.example/account');
   });
 });
 

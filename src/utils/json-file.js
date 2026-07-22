@@ -2,6 +2,14 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
+function unsafePathError(targetPath, expectedType) {
+  const error = new Error(
+    `Sensitive state path must be ${expectedType} and must not be a symbolic link: ${targetPath}`,
+  );
+  error.code = 'EUNSAFESTATEPATH';
+  return error;
+}
+
 function enforcePrivateMode(targetPath, mode) {
   if (process.platform === 'win32') return;
 
@@ -12,8 +20,8 @@ function enforcePrivateMode(targetPath, mode) {
     chmodError = error;
   }
 
-  const actualMode = fs.statSync(targetPath).mode & 0o777;
-  if ((actualMode & 0o077) !== 0) {
+  const actualMode = fs.lstatSync(targetPath).mode & 0o777;
+  if (actualMode !== mode) {
     const error = new Error(
       `Sensitive state path has insecure permissions: ${targetPath} (${actualMode.toString(8)})`,
       { cause: chmodError || undefined },
@@ -24,12 +32,53 @@ function enforcePrivateMode(targetPath, mode) {
 }
 
 export function ensurePrivateDirectory(directory) {
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  let stats = fs.lstatSync(directory, { throwIfNoEntry: false });
+  if (!stats) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    stats = fs.lstatSync(directory);
+  }
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw unsafePathError(directory, 'a directory');
+  }
   enforcePrivateMode(directory, 0o700);
 }
 
 export function ensurePrivateFile(filePath, mode = 0o600) {
+  const stats = fs.lstatSync(filePath);
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    throw unsafePathError(filePath, 'a regular file');
+  }
   enforcePrivateMode(filePath, mode);
+}
+
+function directorySyncIsUnsupported(error) {
+  if (['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'].includes(error?.code)) return true;
+  // Windows does not consistently expose readable directory descriptors.
+  return process.platform === 'win32' && ['EISDIR', 'EPERM', 'EBADF'].includes(error?.code);
+}
+
+function syncDirectory(directory) {
+  let directoryDescriptor;
+  let operationError = null;
+  let closeError = null;
+
+  try {
+    directoryDescriptor = fs.openSync(directory, 'r');
+    fs.fsyncSync(directoryDescriptor);
+  } catch (error) {
+    operationError = error;
+  } finally {
+    if (directoryDescriptor !== undefined) {
+      try {
+        fs.closeSync(directoryDescriptor);
+      } catch (error) {
+        closeError = error;
+      }
+    }
+  }
+
+  if (closeError) throw closeError;
+  if (operationError && !directorySyncIsUnsupported(operationError)) throw operationError;
 }
 
 /**
@@ -53,10 +102,15 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
   );
 
   ensurePrivateDirectory(directory);
+  const existing = fs.lstatSync(filePath, { throwIfNoEntry: false });
+  if (existing) ensurePrivateFile(filePath, mode);
 
   let fileDescriptor;
   try {
     fileDescriptor = fs.openSync(tempPath, 'wx', mode);
+    if (!fs.fstatSync(fileDescriptor).isFile()) {
+      throw unsafePathError(tempPath, 'a regular file');
+    }
     fs.writeFileSync(fileDescriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
     fs.fsyncSync(fileDescriptor);
     fs.closeSync(fileDescriptor);
@@ -64,22 +118,8 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
 
     ensurePrivateFile(tempPath, mode);
     fs.renameSync(tempPath, filePath);
-
-    // Best-effort directory sync makes the rename durable across sudden power
-    // loss on filesystems that support syncing directory descriptors.
-    let directoryDescriptor;
-    try {
-      directoryDescriptor = fs.openSync(directory, 'r');
-      fs.fsyncSync(directoryDescriptor);
-    } catch {
-      // Directory fsync is not available on every platform/filesystem.
-    } finally {
-      if (directoryDescriptor !== undefined) {
-        try {
-          fs.closeSync(directoryDescriptor);
-        } catch {}
-      }
-    }
+    ensurePrivateFile(filePath, mode);
+    syncDirectory(directory);
   } catch (error) {
     if (fileDescriptor !== undefined) {
       try {

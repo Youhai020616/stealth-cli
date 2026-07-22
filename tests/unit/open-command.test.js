@@ -150,6 +150,17 @@ describe('open command', () => {
     expect(() => parseCheckpointInterval('249')).toThrow('250 to 60000');
     expect(() => parseCheckpointInterval('60001')).toThrow('250 to 60000');
     expect(() => parseCheckpointInterval('1000.5')).toThrow('250 to 60000');
+
+    let failure;
+    try {
+      parseCheckpointInterval('not-a-number');
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      name: 'InvalidArgumentError',
+      exitCode: 2,
+    });
   });
 
   it('should warn when no persistence target was provided', async () => {
@@ -228,6 +239,22 @@ describe('open command', () => {
 
     expect(process.exitCode).toBe(1);
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('cleanup was incomplete'));
+  });
+
+  it('should make Commander exit with code 2 for an invalid checkpoint interval', async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.configureOutput({ writeErr: vi.fn() });
+    registerOpen(program);
+
+    await expect(program.parseAsync([
+      'open',
+      '--checkpoint-interval',
+      '249',
+    ], { from: 'user' })).rejects.toMatchObject({
+      code: 'commander.invalidArgument',
+      exitCode: 2,
+    });
   });
 
   it('should register profile, session, URL and checkpoint options', () => {

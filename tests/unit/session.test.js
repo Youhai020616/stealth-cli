@@ -3,6 +3,7 @@ import {
   getSession, saveSession, listSessions, deleteSession,
   captureSession, restoreSession, saveSessionSnapshot,
 } from '../../src/session.js';
+import { acquireStateLocks } from '../../src/utils/state-lock.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -13,7 +14,9 @@ const SESSIONS_DIR = path.join(TEST_STEALTH_HOME, 'sessions');
 process.env.STEALTH_HOME = TEST_STEALTH_HOME;
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  fs.rmSync(path.join(TEST_STEALTH_HOME, 'locks'), { recursive: true, force: true });
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 });
 
@@ -22,6 +25,44 @@ afterAll(() => {
   else process.env.STEALTH_HOME = ORIGINAL_STEALTH_HOME;
   fs.rmSync(TEST_STEALTH_HOME, { recursive: true, force: true });
 });
+
+function sessionFixture(overrides = {}) {
+  return {
+    name: 'fixture',
+    profile: null,
+    cookies: [],
+    history: [],
+    lastUrl: null,
+    createdAt: new Date(0).toISOString(),
+    lastAccess: null,
+    ...overrides,
+  };
+}
+
+function writeSessionFixture(fileName, session) {
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(SESSIONS_DIR, fileName),
+    `${JSON.stringify(session)}\n`,
+    { mode: 0o600 },
+  );
+}
+
+function supportsCaseSensitiveNames(directory) {
+  const upper = path.join(directory, '__CaseProbe');
+  const lower = path.join(directory, '__caseprobe');
+  fs.writeFileSync(upper, 'upper');
+  try {
+    fs.writeFileSync(lower, 'lower', { flag: 'wx' });
+    return true;
+  } catch (error) {
+    if (error.code === 'EEXIST') return false;
+    throw error;
+  } finally {
+    fs.rmSync(upper, { force: true });
+    fs.rmSync(lower, { force: true });
+  }
+}
 
 describe('session', () => {
   it('should create a new session with defaults', () => {
@@ -62,6 +103,58 @@ describe('session', () => {
     expect(() => saveSession('session.json', session)).toThrow('only letters');
   });
 
+  it('canonicalizes case aliases to one session file and identity', () => {
+    const session = getSession('MixedCase');
+    expect(session.name).toBe('mixedcase');
+    saveSession('MIXEDCASE', session);
+
+    expect(fs.existsSync(path.join(SESSIONS_DIR, 'mixedcase.json'))).toBe(true);
+    expect(getSession('mixedcase').name).toBe('mixedcase');
+    expect(getSession('MixedCase').lastAccess).not.toBeNull();
+  });
+
+  it('resolves mixed-case legacy filenames and normalizes embedded profile links', () => {
+    writeSessionFixture('LegacyLogin.JSON', sessionFixture({
+      name: 'LEGACYLOGIN',
+      profile: 'Work',
+      lastUrl: 'https://example.com',
+    }));
+
+    const loaded = getSession('legacylogin');
+    expect(loaded.name).toBe('legacylogin');
+    expect(loaded.profile).toBe('work');
+    expect(listSessions()).toContainEqual(expect.objectContaining({
+      name: 'legacylogin',
+      profile: 'work',
+    }));
+  });
+
+  it('detects case-insensitive session filename collisions on case-sensitive filesystems', () => {
+    if (!supportsCaseSensitiveNames(SESSIONS_DIR)) return;
+    writeSessionFixture('Login.json', sessionFixture({ name: 'Login' }));
+    writeSessionFixture('login.JSON', sessionFixture({ name: 'login' }));
+
+    expect(() => getSession('login')).toThrow('filename collisions');
+    expect(() => listSessions()).toThrow('filename collisions');
+  });
+
+  it('uses canonical basenames and rejects unsafe embedded profile links', () => {
+    writeSessionFixture('RenamedSession.json', sessionFixture({ name: 'OldName' }));
+    writeSessionFixture('UnsafeLink.json', sessionFixture({ profile: '../outside' }));
+
+    expect(getSession('renamedsession').name).toBe('renamedsession');
+    let error;
+    try {
+      getSession('unsafelink');
+    } catch (cause) {
+      error = cause;
+    }
+    expect(error?.name).toBe('ProfileError');
+    expect(error?.code).toBe(8);
+    expect(error?.message).toContain('invalid format');
+    expect(listSessions()).toContainEqual({ name: 'unsafelink', error: 'corrupted' });
+  });
+
   it('should harden legacy session file permissions when loading', () => {
     if (process.platform === 'win32') return;
     const session = getSession('__test_legacy_mode');
@@ -100,7 +193,7 @@ describe('session', () => {
 
     const session = await captureSession('__test_capture', context, page, {
       cookies,
-      profile: 'work',
+      profile: 'Work',
     });
 
     expect(context.cookies).not.toHaveBeenCalled();
@@ -109,15 +202,45 @@ describe('session', () => {
     expect(session.profile).toBe('work');
   });
 
+  it('locks every session mutation and reuses an owning lifetime lease', async () => {
+    const name = '__test_locked';
+    const lease = acquireStateLocks({ session: name });
+    const session = getSession(name);
+    const cookies = [{ name: 'sid', value: '123', domain: 'example.com', path: '/' }];
+    const context = { cookies: vi.fn().mockResolvedValue(cookies) };
+    const page = { url: vi.fn(() => 'https://example.com/account') };
+
+    try {
+      expect(() => saveSession(name, session)).toThrow('already in use');
+      saveSession(name, session, { lease });
+
+      expect(() => saveSessionSnapshot(name, { cookies, lastUrl: 'https://example.com' }))
+        .toThrow('already in use');
+      saveSessionSnapshot(name, { cookies, lastUrl: 'https://example.com' }, { lease });
+
+      await expect(captureSession(name, context, page)).rejects.toThrow('already in use');
+      await expect(captureSession(name, context, page, { lease })).resolves.toMatchObject({
+        cookies,
+        lastUrl: 'https://example.com/account',
+      });
+
+      expect(() => deleteSession(name)).toThrow('already in use');
+      deleteSession(name, { lease });
+      expect(getSession(name).lastAccess).toBeNull();
+    } finally {
+      lease();
+    }
+  });
+
   it('should keep profile cookies canonical when restoring a linked session', async () => {
     saveSessionSnapshot('__test_linked', {
       cookies: [{ name: 'sid', value: 'stale', domain: 'example.com', path: '/' }],
       lastUrl: 'https://example.com',
-    }, { profile: 'work' });
+    }, { profile: 'Work' });
     const context = { addCookies: vi.fn() };
 
     const restored = await restoreSession('__test_linked', context, {
-      expectedProfile: 'work',
+      expectedProfile: 'WORK',
       restoreCookies: false,
     });
 
@@ -164,6 +287,75 @@ describe('session', () => {
       '__test_restore_error',
       { addCookies: vi.fn().mockRejectedValue(new Error('invalid cookie')) },
     )).rejects.toThrow('invalid cookie');
+  });
+
+  it('rejects malformed loaded sessions with ProfileError before browser use', () => {
+    const malformed = [
+      [],
+      sessionFixture({ cookies: {} }),
+      sessionFixture({ history: {} }),
+      sessionFixture({ cookies: [null] }),
+      sessionFixture({ history: [42] }),
+      sessionFixture({ profile: 42 }),
+      sessionFixture({ lastUrl: {} }),
+      sessionFixture({ name: 42 }),
+    ];
+
+    malformed.forEach((value, index) => {
+      const name = `malformed_${index}`;
+      writeSessionFixture(`${name}.json`, value);
+      let error;
+      try {
+        getSession(name);
+      } catch (cause) {
+        error = cause;
+      }
+      expect(error?.name).toBe('ProfileError');
+      expect(error?.code).toBe(8);
+      expect(error).not.toBeInstanceOf(TypeError);
+    });
+  });
+
+  it('distinguishes unreadable session files from corrupted JSON', () => {
+    const name = '__test_permission';
+    saveSession(name, getSession(name));
+    const filePath = path.join(SESSIONS_DIR, `${name}.json`);
+    const readFileSync = fs.readFileSync.bind(fs);
+    vi.spyOn(fs, 'readFileSync').mockImplementation((target, ...args) => {
+      if (path.resolve(String(target)) === filePath) {
+        const error = new Error('permission denied');
+        error.code = 'EACCES';
+        throw error;
+      }
+      return readFileSync(target, ...args);
+    });
+
+    let permissionError;
+    try {
+      getSession(name);
+    } catch (cause) {
+      permissionError = cause;
+    }
+    expect(permissionError?.code).toBe(8);
+    expect(permissionError?.message).toContain('could not be read');
+    expect(permissionError?.message).not.toContain('corrupted');
+
+    vi.restoreAllMocks();
+    fs.writeFileSync(filePath, '{bad-json', { mode: 0o600 });
+    expect(() => getSession(name)).toThrow('corrupted');
+  });
+
+  const symlinkIt = process.platform === 'win32' ? it.skip : it;
+  symlinkIt('rejects a symbolic-link session file without following it', () => {
+    const outside = path.join(TEST_STEALTH_HOME, 'outside-session.json');
+    fs.writeFileSync(outside, JSON.stringify(sessionFixture({ name: 'linked' })), {
+      mode: 0o600,
+    });
+    fs.symlinkSync(outside, path.join(SESSIONS_DIR, 'linked.json'));
+
+    expect(() => getSession('linked')).toThrow('cannot be accessed securely');
+    expect(listSessions()).toContainEqual({ name: 'linked', error: 'unreadable' });
+    expect(JSON.parse(fs.readFileSync(outside, 'utf8')).name).toBe('linked');
   });
 
   it('should preserve session data across saves', () => {

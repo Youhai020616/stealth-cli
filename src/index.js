@@ -6,9 +6,6 @@
 export {
   launchBrowser,
   closeBrowser,
-  captureBrowserState,
-  writeBrowserStateSnapshot,
-  persistBrowserState,
   navigate,
   getSnapshot,
   getA11ySnapshot,

@@ -245,16 +245,18 @@ export function createBrowserLifecycle(handle, opts = {}) {
   const bindPage = (page) => {
     if (!page || pageListeners.has(page)) return;
 
-    const onClose = () => {
-      updateLastKnownUrl(page);
-      checkForLastPage();
-    };
     const onFrameNavigated = (frame) => {
       try {
         if (typeof page.mainFrame !== 'function' || frame === page.mainFrame()) {
           updateLastKnownUrl(page);
         }
       } catch {}
+    };
+    const onClose = () => {
+      removeListener(page, 'close', onClose);
+      removeListener(page, 'framenavigated', onFrameNavigated);
+      pageListeners.delete(page);
+      checkForLastPage();
     };
 
     page.on('close', onClose);

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   StealthError,
   BrowserLaunchError,
+  BrowserCleanupError,
   NavigationError,
   ExtractionError,
   TimeoutError,
@@ -10,6 +11,7 @@ import {
   PersistenceError,
   BlockedError,
   handleError,
+  safeUrlForDisplay,
 } from '../../src/errors.js';
 
 describe('error classes', () => {
@@ -37,12 +39,43 @@ describe('error classes', () => {
     expect(err.name).toBe('BrowserLaunchError');
   });
 
+  it('BrowserCleanupError should use a cleanup-specific hint and retain failures', () => {
+    const failure = { target: 'browser', error: new Error('busy') };
+    const err = new BrowserCleanupError('cleanup failed', { failures: [failure] });
+
+    expect(err.code).toBe(1);
+    expect(err.hint).toContain('Retry closing');
+    expect(err.hint).not.toContain('camoufox-js fetch');
+    expect(err.failures).toEqual([failure]);
+  });
+
   it('NavigationError should detect timeout cause', () => {
     const cause = new Error('page.goto: Timeout 30000ms exceeded');
     const err = new NavigationError('https://example.com', cause);
     expect(err.code).toBe(4);
     expect(err.hint).toContain('timed out');
     expect(err.url).toBe('https://example.com');
+  });
+
+  it('NavigationError should retain the raw URL only in url while redacting display text', () => {
+    const rawUrl = 'https://user:password@example.com/callback?code=secret#token';
+    const err = new NavigationError(rawUrl, new Error(`failed for ${rawUrl}`));
+
+    expect(err.url).toBe(rawUrl);
+    expect(err.message).toBe('Failed to navigate to https://example.com');
+    expect(err.format()).not.toContain('password');
+    expect(err.format()).not.toContain('callback');
+    expect(err.format()).not.toContain('secret');
+    expect(err.format()).not.toContain('token');
+  });
+
+  it('should use a generic safe label for malformed secret-bearing URLs', () => {
+    const rawUrl = 'not-a-url?token=super-secret';
+    const err = new NavigationError(rawUrl, new Error('failed'));
+
+    expect(safeUrlForDisplay(rawUrl)).toBe('requested URL');
+    expect(err.message).toBe('Failed to navigate to requested URL');
+    expect(err.format()).not.toContain('super-secret');
   });
 
   it('NavigationError should detect network cause', () => {

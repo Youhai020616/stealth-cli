@@ -14,6 +14,7 @@ export async function closeBrowserForCli(handle, opts = {}) {
   const result = await closeBrowser(handle);
 
   if (result.persistenceError) {
+    logger.warn(`Browser state was not fully saved: ${result.persistenceError.message}`);
     setFailureExitCode(result.persistenceError.code || 8);
   }
   if (result.cleanupErrors.length > 0) {
