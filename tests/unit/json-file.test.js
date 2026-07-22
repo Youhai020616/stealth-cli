@@ -1,4 +1,4 @@
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -28,6 +28,28 @@ function temporaryDirectory() {
 
 function temporaryFile() {
   return path.join(temporaryDirectory(), 'state.json');
+}
+
+async function waitForPath(filePath, timeout = 5000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for child-process marker: ${filePath}`);
+}
+
+function collectChildResult(child) {
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (status, signal) => resolve({ status, signal, stdout, stderr }));
+  });
 }
 
 describe('private state permissions', () => {
@@ -241,6 +263,186 @@ describe('writeJsonAtomic', () => {
     expect(fs.readdirSync(path.dirname(filePath))).toEqual(['state.json']);
   });
 
+  it('retains a failed write-claim release and drains it before another claim', () => {
+    const filePath = temporaryFile();
+    const openSync = fs.openSync.bind(fs);
+    const unlinkSync = fs.unlinkSync.bind(fs);
+    let claimPath;
+    let claimOpenCount = 0;
+
+    vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
+      const descriptor = openSync(target, ...args);
+      if (typeof target === 'string' && target.endsWith('.claim')) {
+        claimPath = target;
+        claimOpenCount += 1;
+      }
+      return descriptor;
+    });
+    vi.spyOn(fs, 'unlinkSync').mockImplementation((target) => {
+      if (target === claimPath) {
+        const error = new Error('claim unlink failed');
+        error.code = 'EIO';
+        throw error;
+      }
+      return unlinkSync(target);
+    });
+
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 1 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.code).toBe('EJSONCLEANUP');
+    expect(failure?.message).toContain('committed');
+    expect(failure?.commitOutcome).toEqual({
+      status: 'committed',
+      replacement: 'published',
+      cleanup: { status: 'pending' },
+    });
+    expect(Object.getOwnPropertyDescriptor(failure, 'commitOutcome')?.enumerable).toBe(false);
+    expect(failure?.cleanupOutcome?.artifacts).toContainEqual(expect.objectContaining({
+      operation: 'release',
+      path: claimPath,
+    }));
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 1 });
+    expect(fs.existsSync(claimPath)).toBe(true);
+    expect(claimOpenCount).toBe(1);
+
+    expect(() => writeJsonAtomic(filePath, { version: 2 }))
+      .toThrow('cleanup is incomplete');
+    expect(claimOpenCount).toBe(1);
+
+    vi.restoreAllMocks();
+    expect(() => writeJsonAtomic(filePath, { version: 3 })).not.toThrow();
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 3 });
+    expect(fs.readdirSync(path.dirname(filePath))).toEqual(['state.json']);
+  });
+
+  it('retries write-claim removal sync before admitting another claim', () => {
+    const filePath = temporaryFile();
+    const openSync = fs.openSync.bind(fs);
+    const fsyncSync = fs.fsyncSync.bind(fs);
+    let claimPath;
+    let claimOpenCount = 0;
+    let directorySyncs = 0;
+
+    vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
+      const descriptor = openSync(target, ...args);
+      if (typeof target === 'string' && target.endsWith('.claim')) {
+        claimPath = target;
+        claimOpenCount += 1;
+      }
+      return descriptor;
+    });
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
+      if (fs.fstatSync(descriptor).isDirectory()) {
+        directorySyncs += 1;
+        if (directorySyncs >= 3) {
+          const error = new Error('claim removal sync failed');
+          error.code = 'EIO';
+          throw error;
+        }
+      }
+      return fsyncSync(descriptor);
+    });
+
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 1 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.code).toBe('EJSONCLEANUP');
+    expect(failure?.commitOutcome?.status).toBe('committed');
+    expect(failure?.cleanupOutcome?.artifacts).toContainEqual(expect.objectContaining({
+      operation: 'release',
+      path: claimPath,
+    }));
+    expect(fs.existsSync(claimPath)).toBe(false);
+    expect(claimOpenCount).toBe(1);
+
+    expect(() => writeJsonAtomic(filePath, { version: 2 }))
+      .toThrow('cleanup is incomplete');
+    expect(claimOpenCount).toBe(1);
+
+    vi.restoreAllMocks();
+    expect(() => writeJsonAtomic(filePath, { version: 3 })).not.toThrow();
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 3 });
+    expect(fs.readdirSync(path.dirname(filePath))).toEqual(['state.json']);
+  });
+
+  it('never retries an identity-less descriptor after an ambiguous close', () => {
+    const filePath = temporaryFile();
+    const directory = path.dirname(filePath);
+    const unrelatedPath = path.join(directory, 'unrelated.txt');
+    const openSync = fs.openSync.bind(fs);
+    const fstatSync = fs.fstatSync.bind(fs);
+    const closeSync = fs.closeSync.bind(fs);
+    let claimDescriptor;
+    let claimPath;
+    let initialFstatFailed = false;
+    let ambiguousCloseInjected = false;
+
+    vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
+      const descriptor = openSync(target, ...args);
+      if (typeof target === 'string' && target.endsWith('.claim')) {
+        claimDescriptor = descriptor;
+        claimPath = target;
+      }
+      return descriptor;
+    });
+    vi.spyOn(fs, 'fstatSync').mockImplementation((descriptor, ...args) => {
+      if (descriptor === claimDescriptor && !initialFstatFailed) {
+        initialFstatFailed = true;
+        const error = new Error('claim identity lookup failed');
+        error.code = 'EIO';
+        throw error;
+      }
+      return fstatSync(descriptor, ...args);
+    });
+    vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+      if (descriptor === claimDescriptor && !ambiguousCloseInjected) {
+        ambiguousCloseInjected = true;
+        closeSync(descriptor);
+        const error = new Error('close reported failure after releasing descriptor');
+        error.code = 'EIO';
+        throw error;
+      }
+      return closeSync(descriptor);
+    });
+
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 1 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.message).toContain('claim identity lookup failed');
+    expect(failure?.cleanupOutcome?.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: 'close', path: claimPath }),
+      expect.objectContaining({ operation: 'inspect', path: claimPath }),
+    ]));
+    expect(fs.existsSync(claimPath)).toBe(true);
+
+    vi.restoreAllMocks();
+    const unrelatedDescriptor = fs.openSync(unrelatedPath, 'w+', 0o600);
+    expect(unrelatedDescriptor).toBe(claimDescriptor);
+
+    expect(() => writeJsonAtomic(filePath, { version: 2 }))
+      .toThrow('cleanup is incomplete');
+    expect(fs.fstatSync(unrelatedDescriptor).isFile()).toBe(true);
+    fs.writeSync(unrelatedDescriptor, Buffer.from('still open'));
+    fs.closeSync(unrelatedDescriptor);
+
+    fs.unlinkSync(claimPath);
+    expect(() => writeJsonAtomic(filePath, { version: 3 })).not.toThrow();
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 3 });
+  });
+
   it('fails closed in a new process while a durable temp artifact remains', () => {
     const filePath = temporaryFile();
     const directory = path.dirname(filePath);
@@ -303,6 +505,116 @@ describe('writeJsonAtomic', () => {
       'state.json',
     ].sort());
   });
+
+  it('holds a durable claim across scan and publication in another process', async () => {
+    const filePath = temporaryFile();
+    const directory = path.dirname(filePath);
+    const readyPath = path.join(directory, 'writer-ready');
+    const releasePath = path.join(directory, 'release-writer');
+    const firstWriterScript = `
+      import fs from 'fs';
+      import path from 'path';
+      import { writeJsonAtomic } from ${JSON.stringify(JSON_FILE_MODULE)};
+
+      const filePath = process.env.TEST_JSON_PATH;
+      const directory = path.dirname(filePath);
+      const readdirSync = fs.readdirSync.bind(fs);
+      let paused = false;
+      fs.readdirSync = (target, ...args) => {
+        const entries = readdirSync(target, ...args);
+        if (!paused && path.resolve(target) === path.resolve(directory)) {
+          paused = true;
+          fs.writeFileSync(process.env.TEST_READY_PATH, 'ready', { mode: 0o600 });
+          const signal = new Int32Array(new SharedArrayBuffer(4));
+          while (!fs.existsSync(process.env.TEST_RELEASE_PATH)) {
+            Atomics.wait(signal, 0, 0, 10);
+          }
+        }
+        return entries;
+      };
+
+      try {
+        writeJsonAtomic(filePath, { writer: 'first' });
+      } catch (error) {
+        process.stderr.write(JSON.stringify({
+          message: error.message,
+          code: error.code,
+          cleanupOutcome: error.cleanupOutcome,
+        }));
+        process.exitCode = 31;
+      }
+    `;
+    const firstWriter = spawn(
+      process.execPath,
+      ['--input-type=module', '--eval', firstWriterScript],
+      {
+        env: {
+          ...process.env,
+          TEST_JSON_PATH: filePath,
+          TEST_READY_PATH: readyPath,
+          TEST_RELEASE_PATH: releasePath,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    const firstResultPromise = collectChildResult(firstWriter);
+    let secondResult;
+    let firstClaimPath;
+
+    try {
+      await waitForPath(readyPath);
+      const claims = fs.readdirSync(directory).filter((name) => name.endsWith('.claim'));
+      expect(claims).toHaveLength(1);
+      firstClaimPath = path.join(directory, claims[0]);
+
+      const secondWriterScript = `
+        import { writeJsonAtomic } from ${JSON.stringify(JSON_FILE_MODULE)};
+        try {
+          writeJsonAtomic(process.env.TEST_JSON_PATH, { writer: 'second' });
+          process.stdout.write('unexpected publication');
+        } catch (error) {
+          process.stderr.write(JSON.stringify({
+            message: error.message,
+            code: error.code,
+            cleanupOutcome: error.cleanupOutcome,
+          }));
+          process.exitCode = 23;
+        }
+      `;
+      secondResult = spawnSync(
+        process.execPath,
+        ['--input-type=module', '--eval', secondWriterScript],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, TEST_JSON_PATH: filePath },
+        },
+      );
+    } finally {
+      fs.writeFileSync(releasePath, 'release', { mode: 0o600 });
+    }
+
+    const firstResult = await firstResultPromise;
+    expect(firstResult).toEqual(expect.objectContaining({
+      status: 0,
+      signal: null,
+      stdout: '',
+      stderr: '',
+    }));
+    expect(secondResult.error).toBeUndefined();
+    expect(secondResult.status).toBe(23);
+    expect(secondResult.stdout).toBe('');
+    const secondFailure = JSON.parse(secondResult.stderr);
+    expect(secondFailure.code).toBe('EJSONCLEANUP');
+    expect(secondFailure.cleanupOutcome.artifacts).toContainEqual(expect.objectContaining({
+      operation: 'inspect',
+      path: firstClaimPath,
+      code: 'EJSONARTIFACTPENDING',
+    }));
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ writer: 'first' });
+    expect(fs.readdirSync(directory).filter((name) => (
+      name.endsWith('.claim') || name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toEqual([]);
+  }, 10000);
 
   it('should preserve the previous file when replacement serialization fails', () => {
     const filePath = temporaryFile();
@@ -371,11 +683,15 @@ describe('writeJsonAtomic', () => {
     const filePath = temporaryFile();
     writeJsonAtomic(filePath, { version: 1 });
     const fsyncSync = fs.fsyncSync.bind(fs);
+    let directorySyncs = 0;
     vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
       if (fs.fstatSync(descriptor).isDirectory()) {
-        const error = new Error('I/O failure');
-        error.code = 'EIO';
-        throw error;
+        directorySyncs += 1;
+        if (directorySyncs >= 2) {
+          const error = new Error('I/O failure');
+          error.code = 'EIO';
+          throw error;
+        }
       }
       return fsyncSync(descriptor);
     });
@@ -398,18 +714,33 @@ describe('writeJsonAtomic', () => {
         error: expect.objectContaining({ code: 'EIO' }),
       }),
     }));
+    expect(Object.getOwnPropertyDescriptor(failure, 'commitOutcome')?.enumerable).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(failure, 'rollbackError')?.enumerable).toBe(false);
     expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 1 });
-    expect(fs.readdirSync(path.dirname(filePath))).toEqual(['state.json']);
+    const artifacts = fs.readdirSync(path.dirname(filePath));
+    expect(artifacts).toContain('state.json');
+    expect(artifacts.filter((name) => name.endsWith('.claim'))).toHaveLength(1);
+    expect(failure?.cleanupOutcome?.artifacts).toContainEqual(expect.objectContaining({
+      operation: 'inspect',
+      path: path.join(
+        path.dirname(filePath),
+        artifacts.find((name) => name.endsWith('.claim')),
+      ),
+    }));
   });
 
   it('restores a new destination to absence after a directory fsync failure', () => {
     const filePath = temporaryFile();
     const fsyncSync = fs.fsyncSync.bind(fs);
+    let directorySyncs = 0;
     vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
       if (fs.fstatSync(descriptor).isDirectory()) {
-        const error = new Error('I/O failure');
-        error.code = 'EIO';
-        throw error;
+        directorySyncs += 1;
+        if (directorySyncs >= 2) {
+          const error = new Error('I/O failure');
+          error.code = 'EIO';
+          throw error;
+        }
       }
       return fsyncSync(descriptor);
     });
@@ -432,8 +763,18 @@ describe('writeJsonAtomic', () => {
         error: expect.objectContaining({ code: 'EIO' }),
       }),
     }));
+    expect(Object.getOwnPropertyDescriptor(failure, 'commitOutcome')?.enumerable).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(failure, 'rollbackError')?.enumerable).toBe(false);
     expect(fs.existsSync(filePath)).toBe(false);
-    expect(fs.readdirSync(path.dirname(filePath))).toEqual([]);
+    const artifacts = fs.readdirSync(path.dirname(filePath));
+    expect(artifacts.filter((name) => name.endsWith('.claim'))).toHaveLength(1);
+    expect(failure?.cleanupOutcome?.artifacts).toContainEqual(expect.objectContaining({
+      operation: 'inspect',
+      path: path.join(
+        path.dirname(filePath),
+        artifacts.find((name) => name.endsWith('.claim')),
+      ),
+    }));
   });
 
   it('restores prior contents after post-rename validation fails', () => {

@@ -24,6 +24,9 @@ export function safeUrlForDisplay(value, fallback = 'requested URL') {
 }
 
 const INSPECT_CUSTOM = Symbol.for('nodejs.util.inspect.custom');
+const JSON_CLEANUP_DETAILS_BRAND = Symbol('jsonCleanupDetails');
+const SENSITIVE_JSON_CLEANUP_TARGET = 'sensitive JSON artifact';
+const JSON_CLEANUP_ARTIFACT_WARNING = 'Verify that no live process owns it, then remove only that exact path.';
 const SAFE_CLEANUP_TARGETS = new Set([
   'browser',
   'context',
@@ -42,6 +45,7 @@ const DEFAULT_CLEANUP_HINTS = {
   'state-lock': 'Do not remove a state lock until you have confirmed that no stealth process owns it',
   'profile state lock': 'Do not remove a state lock until you have confirmed that no stealth process owns it',
   'session state lock': 'Do not remove a state lock until you have confirmed that no stealth process owns it',
+  [SENSITIVE_JSON_CLEANUP_TARGET]: 'Verify that no live process owns it, then remove only the exact artifact path reported below',
   'browser resource': 'Ensure the browser process has exited before retrying',
 };
 
@@ -54,6 +58,122 @@ function defineHidden(target, property, value) {
   });
 }
 
+function isObjectLike(value) {
+  return value !== null && (typeof value === 'object' || typeof value === 'function');
+}
+
+function getOwnDataValue(target, property) {
+  if (!isObjectLike(target)) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(target, property);
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function attachJsonCleanupDetails(error, outcome, artifactErrors = []) {
+  if (!isObjectLike(error) || !isObjectLike(outcome)) return error;
+
+  const isBranded = getOwnDataValue(error, JSON_CLEANUP_DETAILS_BRAND)
+    === JSON_CLEANUP_DETAILS_BRAND;
+  const existingOutcome = isBranded && isObjectLike(getOwnDataValue(error, 'cleanupOutcome'))
+    ? getOwnDataValue(error, 'cleanupOutcome')
+    : {};
+  const existingArtifacts = Array.isArray(getOwnDataValue(existingOutcome, 'artifacts'))
+    ? getOwnDataValue(existingOutcome, 'artifacts')
+    : [];
+  const incomingArtifacts = Array.isArray(getOwnDataValue(outcome, 'artifacts'))
+    ? getOwnDataValue(outcome, 'artifacts')
+    : [];
+  const existingArtifactErrors = isBranded && Array.isArray(getOwnDataValue(error, 'artifactErrors'))
+    ? getOwnDataValue(error, 'artifactErrors')
+    : [];
+  const incomingArtifactErrors = Array.isArray(artifactErrors) ? artifactErrors : [];
+
+  defineHidden(error, 'cleanupOutcome', {
+    ...existingOutcome,
+    ...outcome,
+    artifacts: [...existingArtifacts, ...incomingArtifacts],
+  });
+  defineHidden(error, 'artifactErrors', [
+    ...existingArtifactErrors,
+    ...incomingArtifactErrors,
+  ]);
+  defineHidden(error, JSON_CLEANUP_DETAILS_BRAND, JSON_CLEANUP_DETAILS_BRAND);
+  return error;
+}
+
+function collectJsonCleanupArtifactPaths(value) {
+  const paths = [];
+  const seenNodes = new Set();
+  const seenPaths = new Set();
+
+  const collectOutcomePaths = (error) => {
+    if (getOwnDataValue(error, JSON_CLEANUP_DETAILS_BRAND) !== JSON_CLEANUP_DETAILS_BRAND) {
+      return;
+    }
+
+    const outcome = getOwnDataValue(error, 'cleanupOutcome');
+    const artifacts = getOwnDataValue(outcome, 'artifacts');
+    if (!Array.isArray(artifacts)) return;
+
+    for (let index = 0; index < artifacts.length; index += 1) {
+      const artifact = getOwnDataValue(artifacts, String(index));
+      const artifactPath = getOwnDataValue(artifact, 'path');
+      if (typeof artifactPath !== 'string' || artifactPath.length === 0) continue;
+      if (seenPaths.has(artifactPath)) continue;
+      seenPaths.add(artifactPath);
+      paths.push(artifactPath);
+    }
+  };
+
+  const visit = (current, followFailureError = false) => {
+    if (!isObjectLike(current) || seenNodes.has(current)) return;
+    seenNodes.add(current);
+
+    if (Array.isArray(current)) {
+      for (let index = 0; index < current.length; index += 1) {
+        visit(getOwnDataValue(current, String(index)), followFailureError);
+      }
+      return;
+    }
+
+    collectOutcomePaths(current);
+    visit(getOwnDataValue(current, 'cause'));
+    visit(getOwnDataValue(current, 'cleanupError'));
+    visit(getOwnDataValue(current, 'cleanupFailures'), true);
+    visit(getOwnDataValue(current, 'cleanupErrors'), true);
+    visit(getOwnDataValue(current, 'failures'), true);
+    if (followFailureError) visit(getOwnDataValue(current, 'error'));
+  };
+
+  visit(value);
+  return paths;
+}
+
+function escapeTerminalControls(value) {
+  if (typeof value !== 'string') return value;
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu, (character) => (
+    `\\u${character.codePointAt(0).toString(16).padStart(4, '0')}`
+  ));
+}
+
+function safeTextForTerminal(value) {
+  return escapeTerminalControls(redactUrls(value));
+}
+
+function getJsonCleanupArtifactLines(value) {
+  const lines = [];
+  for (const artifactPath of collectJsonCleanupArtifactPaths(value)) {
+    lines.push(
+      `  Sensitive JSON cleanup artifact: ${escapeTerminalControls(JSON.stringify(artifactPath))}`,
+      `    Warning: ${JSON_CLEANUP_ARTIFACT_WARNING}`,
+    );
+  }
+  return lines;
+}
+
 function redactUrls(value) {
   if (typeof value !== 'string') return value;
   return value.replace(/https?:\/\/[^\s]+/giu, (url) => safeUrlForDisplay(url));
@@ -62,6 +182,13 @@ function redactUrls(value) {
 function safeCleanupTarget(value) {
   if (typeof value !== 'string') return 'browser resource';
   const target = value.trim().toLowerCase();
+  if (
+    target === 'sensitive-json'
+    || target.startsWith('sensitive-json:')
+    || target === SENSITIVE_JSON_CLEANUP_TARGET.toLowerCase()
+  ) {
+    return SENSITIVE_JSON_CLEANUP_TARGET;
+  }
   if (SAFE_CLEANUP_TARGETS.has(target)) return target;
   if (target === 'profile' || target.startsWith('profile:')) return 'profile state lock';
   if (target === 'session' || target.startsWith('session:')) return 'session state lock';
@@ -147,13 +274,14 @@ export class StealthError extends Error {
   }
 
   format() {
-    let msg = redactUrls(this.message);
-    if (this.hint) msg += `\n  Hint: ${redactUrls(this.hint)}`;
+    let msg = safeTextForTerminal(this.message);
+    if (this.hint) msg += `\n  Hint: ${safeTextForTerminal(this.hint)}`;
 
     for (const { target, hint } of getCleanupTargetSummaries(this)) {
-      msg += `\n  Cleanup incomplete: ${target}`;
-      if (hint) msg += `\n    Hint: ${hint}`;
+      msg += `\n  Cleanup incomplete: ${safeTextForTerminal(target)}`;
+      if (hint) msg += `\n    Hint: ${safeTextForTerminal(hint)}`;
     }
+    for (const line of getJsonCleanupArtifactLines(this)) msg += `\n${line}`;
     return msg;
   }
 
@@ -299,18 +427,19 @@ export function handleError(err, opts = {}) {
   };
 
   if (err instanceof StealthError) {
-    log.error(redactUrls(err.message));
-    if (err.hint) log.dim(`  Hint: ${redactUrls(err.hint)}`);
+    log.error(safeTextForTerminal(err.message));
+    if (err.hint) log.dim(`  Hint: ${safeTextForTerminal(err.hint)}`);
     for (const { target, hint } of getCleanupTargetSummaries(err)) {
-      log.dim(`  Cleanup incomplete: ${target}`);
-      if (hint) log.dim(`    Hint: ${hint}`);
+      log.dim(`  Cleanup incomplete: ${safeTextForTerminal(target)}`);
+      if (hint) log.dim(`    Hint: ${safeTextForTerminal(hint)}`);
     }
+    for (const line of getJsonCleanupArtifactLines(err)) log.dim(line);
     if (exit) process.exit(err.code);
     return err.code;
   }
 
   // Unknown error — detect common patterns and add helpful hints
-  log.error(redactUrls(err.message || String(err)));
+  log.error(safeTextForTerminal(err.message || String(err)));
 
   const msg = err.message || '';
   if (msg.includes('ECONNREFUSED')) {
@@ -324,9 +453,10 @@ export function handleError(err, opts = {}) {
   }
 
   for (const { target, hint } of getCleanupTargetSummaries(err)) {
-    log.dim(`  Cleanup incomplete: ${target}`);
-    if (hint) log.dim(`    Hint: ${hint}`);
+    log.dim(`  Cleanup incomplete: ${safeTextForTerminal(target)}`);
+    if (hint) log.dim(`    Hint: ${safeTextForTerminal(hint)}`);
   }
+  for (const line of getJsonCleanupArtifactLines(err)) log.dim(line);
 
   if (exit) process.exit(1);
   return 1;

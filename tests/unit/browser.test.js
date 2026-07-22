@@ -72,7 +72,9 @@ vi.mock('../../src/utils/state-lock.js', () => ({
 import {
   launchBrowser,
   closeBrowser,
+  retryBrowserLaunchCleanup,
   captureBrowserState,
+  trackLastKnownUrl,
   writeBrowserStateSnapshot,
   checkpointBrowserState,
   navigate,
@@ -183,6 +185,7 @@ describe('launchBrowser', () => {
     expect(handle.isDaemon).toBe(true);
     expect(handle.browser).toBeNull();
     expect(handle.page).toBeNull();
+    expect(handle._meta).not.toHaveProperty('proxyUrl');
     expect(createBrowser).not.toHaveBeenCalled();
     expect(stateLease).toHaveBeenCalledOnce();
   });
@@ -354,7 +357,7 @@ describe('launchBrowser', () => {
 
   it('should preserve a saved session URL when an explicit target leaves the page blank', async () => {
     restoreSession.mockResolvedValue({
-      lastUrl: 'https://saved.example/account',
+      lastUrl: 'https://saved-user:saved-password@saved.example/account?token=saved-secret',
       history: [],
       profile: null,
     });
@@ -364,8 +367,12 @@ describe('launchBrowser', () => {
     const snapshot = await captureBrowserState(handle);
 
     expect(mockPage.goto).not.toHaveBeenCalled();
-    expect(handle._meta.lastKnownUrl).toBe('https://saved.example/account');
-    expect(snapshot.lastUrl).toBe('https://saved.example/account');
+    expect(handle._meta).not.toHaveProperty('lastKnownUrl');
+    expect(handle._meta).not.toHaveProperty('sessionInfo');
+    expect(JSON.stringify(handle._meta)).not.toContain('saved-user');
+    expect(JSON.stringify(handle._meta)).not.toContain('saved-password');
+    expect(JSON.stringify(handle._meta)).not.toContain('saved-secret');
+    expect(snapshot.lastUrl).toBe('https://saved-user:saved-password@saved.example/account?token=saved-secret');
   });
 
   it('should redact query parameters when session URL restoration fails', async () => {
@@ -453,7 +460,10 @@ describe('launchBrowser', () => {
     const handle = await launchBrowser({ proxyRotate: true });
 
     expect(getNextProxy).toHaveBeenCalled();
-    expect(handle._meta.proxyUrl).toBe('http://rotated-proxy:9090');
+    expect(createBrowser).toHaveBeenCalledWith(expect.objectContaining({
+      proxy: expect.objectContaining({ server: 'http://rotated-proxy:9090' }),
+    }));
+    expect(handle._meta).not.toHaveProperty('proxyUrl');
   });
 
   it('should fail before browser launch when an explicit profile is malformed', async () => {
@@ -622,6 +632,36 @@ describe('launchBrowser', () => {
     expect(stateLease).toHaveBeenCalledOnce();
   });
 
+  it('should retry a transient browser close during launch rollback and release state locks', async () => {
+    const stateLease = createStateLease({ session: 'login' });
+    acquireStateLocks.mockReturnValue(stateLease);
+    const initializationError = new Error('context failed');
+    const mockBrowser = {
+      newContext: vi.fn().mockRejectedValue(initializationError),
+      close: vi.fn()
+        .mockRejectedValueOnce(new Error('browser temporarily busy'))
+        .mockResolvedValueOnce(undefined),
+      isConnected: vi.fn(() => true),
+    };
+    createBrowser.mockResolvedValue(mockBrowser);
+
+    let failure;
+    try {
+      await launchBrowser({ session: 'login' });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'BrowserLaunchError',
+      cause: initializationError,
+      cleanupFailures: [],
+    });
+    expect(mockBrowser.close).toHaveBeenCalledTimes(2);
+    expect(stateLease).toHaveBeenCalledOnce();
+    expect(stateLease.owns('session', 'login')).toBe(false);
+  });
+
   it('should preserve the launch failure and retain ownership when rollback cannot close a connected browser', async () => {
     const stateLease = createStateLease({ session: 'login' });
     acquireStateLocks.mockReturnValue(stateLease);
@@ -647,8 +687,61 @@ describe('launchBrowser', () => {
       cleanupFailures: [expect.objectContaining({ target: 'browser', error: cleanupError })],
       cleanupError: expect.objectContaining({ name: 'BrowserCleanupError' }),
     });
+    expect(mockBrowser.close).toHaveBeenCalledTimes(2);
     expect(stateLease).not.toHaveBeenCalled();
     expect(stateLease.owns('session', 'login')).toBe(true);
+  });
+
+  it('should preserve a private cleanup capability across strict failure and remove it after recovery', async () => {
+    const stateLease = createStateLease({ session: 'login' });
+    acquireStateLocks.mockReturnValue(stateLease);
+    const cleanupError = new Error('browser still connected');
+    const mockBrowser = {
+      newContext: vi.fn().mockRejectedValue(new Error('context failed')),
+      close: vi.fn().mockRejectedValue(cleanupError),
+      isConnected: vi.fn(() => true),
+    };
+    createBrowser.mockResolvedValue(mockBrowser);
+
+    let failure;
+    try {
+      await launchBrowser({ session: 'login' });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(mockBrowser.close).toHaveBeenCalledTimes(2);
+    expect(failure).not.toHaveProperty('rollbackHandle');
+    expect(failure).not.toHaveProperty('stateLease');
+
+    await expect(retryBrowserLaunchCleanup(failure, { strict: true })).rejects.toMatchObject({
+      name: 'BrowserCleanupError',
+      failures: [expect.objectContaining({ target: 'browser', error: cleanupError })],
+    });
+    expect(mockBrowser.close).toHaveBeenCalledTimes(3);
+    expect(stateLease).not.toHaveBeenCalled();
+    expect(stateLease.owns('session', 'login')).toBe(true);
+
+    mockBrowser.close.mockResolvedValue(undefined);
+    await expect(retryBrowserLaunchCleanup(failure, { strict: true })).resolves.toMatchObject({
+      cleanupErrors: [],
+    });
+    expect(mockBrowser.close).toHaveBeenCalledTimes(4);
+    expect(stateLease).toHaveBeenCalledOnce();
+    expect(stateLease.owns('session', 'login')).toBe(false);
+
+    await expect(retryBrowserLaunchCleanup(failure)).rejects.toMatchObject({
+      name: 'BrowserCleanupError',
+      message: 'No pending browser launch cleanup is available for this error',
+    });
+    expect(mockBrowser.close).toHaveBeenCalledTimes(4);
+  });
+
+  it('should reject cleanup retries for arbitrary errors', async () => {
+    await expect(retryBrowserLaunchCleanup(new Error('unrelated'))).rejects.toMatchObject({
+      name: 'BrowserCleanupError',
+      message: 'No pending browser launch cleanup is available for this error',
+    });
   });
 
   it('should retry a transient state-lease release during launch rollback', async () => {
@@ -824,8 +917,9 @@ describe('browser state persistence', () => {
       browser: { isConnected: vi.fn(() => true) },
       context: { cookies: vi.fn().mockResolvedValue([]), pages },
       page: primary,
-      _meta: { lastKnownUrl: 'https://example.com/lifecycle' },
+      _meta: {},
     };
+    trackLastKnownUrl(handle, 'https://example.com/lifecycle');
 
     const snapshot = await captureBrowserState(handle);
 
@@ -850,7 +944,7 @@ describe('browser state persistence', () => {
         pages: vi.fn(() => [primary, popup]),
       },
       page: primary,
-      _meta: { lastKnownUrl: 'about:blank' },
+      _meta: {},
     };
 
     const snapshot = await captureBrowserState(handle);
@@ -1264,14 +1358,14 @@ describe('navigate', () => {
     const handle = {
       isDaemon: false,
       page: mockPage,
-      _meta: { lastKnownUrl: 'https://saved.example/account' },
+      _meta: {},
     };
 
     const result = await navigate(handle, 'https://example.com');
 
     expect(mockPage.goto).toHaveBeenCalled();
     expect(result).toBe('https://example.com/');
-    expect(handle._meta.lastKnownUrl).toBe('https://example.com/');
+    expect(handle._meta).not.toHaveProperty('lastKnownUrl');
   });
 
   it('should keep the saved URL when a successful navigation still reports about:blank', async () => {
@@ -1281,13 +1375,21 @@ describe('navigate', () => {
     };
     const handle = {
       isDaemon: false,
+      browser: { isConnected: vi.fn(() => true) },
+      context: {
+        cookies: vi.fn().mockResolvedValue([]),
+        pages: vi.fn(() => [mockPage]),
+      },
       page: mockPage,
-      _meta: { lastKnownUrl: 'https://saved.example/account' },
+      _meta: {},
     };
+    trackLastKnownUrl(handle, 'https://saved.example/account');
 
     await navigate(handle, 'about:blank');
+    const snapshot = await captureBrowserState(handle);
 
-    expect(handle._meta.lastKnownUrl).toBe('https://saved.example/account');
+    expect(snapshot.lastUrl).toBe('https://saved.example/account');
+    expect(handle._meta).not.toHaveProperty('lastKnownUrl');
   });
 
   it('should redact credentials, paths, queries, and fragments from navigation failures', async () => {

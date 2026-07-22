@@ -54,14 +54,14 @@ tests/
 - `browser.js` detects daemon automatically; headed, stateful, proxied, or `forceDirect` launches always bypass it
 - `open` and direct `interactive` own SIGINT/SIGTERM/SIGHUP handling so state is checkpointed before shutdown
 - Named profile/session browser state is lowercase-canonical and single-writer; browser lifetimes and standalone mutations use the same lease protocol
-- Browser-lifetime leases are held in a module-private `WeakMap` in `browser.js`; never expose them on handles. Validate writes with branded `ownsStateLock(lease, kind, name)`, not a caller-provided `.owns()` method
+- Browser-lifetime leases and raw last-known URLs are held in module-private `WeakMap`s in `browser.js`; never expose them on handles. Validate writes with branded `ownsStateLock(lease, kind, name)`, not a caller-provided `.owns()` method
 - State locks fail closed after crashes and are never auto-removed; users must verify ownership before removing the exact stale lock path reported by the CLI
 - State names reject path-like input and Windows device basenames on every platform. Legacy sanitized metadata is rewritten on the next successful save; profile basenames come from `stealth profile list`, while legacy session basenames must be inspected under `$STEALTH_HOME/sessions` because no session-list CLI command exists
 - A session-only launch restores its linked profile; invalid state names, malformed state, or a missing linked profile fail before browser launch
-- SDK `closeBrowser()` is best-effort by default; `{ strict: true }` throws after cleanup. Later calls retry unfinished resource/lease cleanup but never recapture persistence. CLI commands surface close-time persistence failures with a non-zero exit status
+- SDK `closeBrowser()` is best-effort by default; `{ strict: true }` throws after cleanup. Later calls retry unfinished resource/lease cleanup but never recapture persistence. Failed launch rollback retries twice, then keeps a private error-scoped recovery capability for `retryBrowserLaunchCleanup(error)`. CLI commands surface close-time persistence failures with a non-zero exit status
 - All browser launch goes through `camoufox-js` `launchOptions()` → `playwright-core` `firefox.launch()`. Never use `chromium.launch()` or `playwright` (non-core)
 - `STEALTH_HOME` overrides profile, session, and lock storage; config, proxy-pool, and daemon paths still use `~/.stealth`. Profile/session/config/proxy JSON uses owner-only POSIX storage; mode bits are not enforceable on Windows, so Windows users must protect sensitive paths with ACLs
-- Atomic JSON writers fail closed on strict destination-scoped `.tmp`/`.rollback` artifacts left by any process. Never auto-remove cross-process artifacts; verify ownership and remove only the exact owner-only path reported to the user
+- Atomic JSON writers hold a durable unique `.claim` from pre-read admission through publish/rollback sync. They fail closed on strict destination-scoped `.claim`/`.tmp`/`.rollback` artifacts left by any process. Never auto-remove cross-process artifacts; verify ownership and remove only the exact owner-only path reported to the user. This serializes cooperative stealth-cli writers on a coherent local filesystem; owner-only storage is not a sandbox against hostile code already running as the same OS user
 - Daemon socket: `~/.stealth/daemon.sock`, PID: `~/.stealth/daemon.pid`
 
 ## camoufox-js API (DO NOT GUESS)

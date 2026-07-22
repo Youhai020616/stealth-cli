@@ -4,6 +4,7 @@ import {
   createBrowserLifecycle,
   createLaunchSignalGuard,
 } from '../../src/browser-lifecycle.js';
+import { captureBrowserState, trackLastKnownUrl } from '../../src/browser.js';
 import { ProfileError } from '../../src/errors.js';
 
 class MockPage extends EventEmitter {
@@ -40,6 +41,10 @@ class MockContext extends EventEmitter {
 
   pages() {
     return this.pageList;
+  }
+
+  async cookies() {
+    return [{ name: 'sid', value: '123' }];
   }
 
   addPage(page) {
@@ -80,14 +85,10 @@ function createHarness(opts = {}) {
     _meta: {
       profileName: opts.profile === false ? null : 'work',
       sessionName: opts.session ? 'login' : null,
-      lastKnownUrl: page.url(),
     },
   };
-  const captureState = opts.captureState || vi.fn(async () => ({
-    cookies: [{ name: 'sid', value: '123' }],
-    lastUrl: handle._meta.lastKnownUrl,
-    capturedAt: new Date().toISOString(),
-  }));
+  trackLastKnownUrl(handle, page.url());
+  const captureState = opts.captureState || vi.fn(captureBrowserState);
   const writeSnapshot = opts.writeSnapshot || vi.fn(async (_handle, snapshot) => ({
     snapshot,
     results: {
@@ -216,9 +217,9 @@ describe('browser lifecycle', () => {
     popup.currentUrl = 'https://auth.example/callback?code=updated';
     popup.emit('framenavigated', popup);
 
-    expect(harness.handle._meta.lastKnownUrl).toBe('https://example.com');
+    expect((await captureBrowserState(harness.handle)).lastUrl).toBe('https://example.com');
     popup.closePage();
-    expect(harness.handle._meta.lastKnownUrl).toBe('https://example.com');
+    expect((await captureBrowserState(harness.handle)).lastUrl).toBe('https://example.com');
 
     const remaining = new MockPage('https://example.com/authenticated');
     harness.context.addPage(remaining);
@@ -226,7 +227,8 @@ describe('browser lifecycle', () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(harness.lifecycle.phase).toBe('running');
-    expect(harness.handle._meta.lastKnownUrl).toBe('https://example.com/authenticated');
+    expect((await captureBrowserState(harness.handle)).lastUrl)
+      .toBe('https://example.com/authenticated');
     remaining.closePage();
     await harness.lifecycle.wait();
   });

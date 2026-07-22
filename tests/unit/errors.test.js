@@ -12,6 +12,7 @@ import {
   PersistenceError,
   BlockedError,
   attachCleanupFailures,
+  attachJsonCleanupDetails,
   handleError,
   safeUrlForDisplay,
 } from '../../src/errors.js';
@@ -154,6 +155,177 @@ describe('error classes', () => {
     }));
     expect(inspect(err)).not.toContain('cause-secret');
     expect(JSON.stringify({ ...err })).not.toContain('super-secret');
+  });
+
+  it('prints branded sensitive JSON artifacts through nested error wrappers without serializing internals', () => {
+    const artifactPath = '/Users/example/.stealth/profiles/.work.secret.pending.tmp';
+    const secondaryArtifactPath = '/Users/example/.stealth/sessions/.login.pending.rollback';
+    const destination = '/Users/example/.stealth/profiles/destination-secret.json';
+    const artifactError = new Error(`artifact-validation-secret: ${artifactPath}`);
+    const rawError = attachJsonCleanupDetails(
+      new Error('raw-cleanup-secret'),
+      {
+        status: 'pending',
+        destination,
+        artifacts: [{ operation: 'inspect', path: artifactPath, code: 'ESECRETDETAIL' }],
+      },
+      [{ path: artifactPath, error: artifactError }],
+    );
+    attachCleanupFailures(rawError, [{
+      target: `sensitive-json:${artifactPath}`,
+      error: artifactError,
+    }]);
+    const secondaryRawError = attachJsonCleanupDetails(
+      new Error('secondary-raw-secret'),
+      {
+        status: 'pending',
+        artifacts: [{ operation: 'inspect', path: secondaryArtifactPath }],
+      },
+    );
+
+    const err = new ProfileError('profile save failed', {
+      cause: new PersistenceError('state persistence failed', {
+        cause: new ProxyError(
+          'http://proxy-user:proxy-secret@proxy.example:8080',
+          new StealthError('storage wrapper failed', { cause: rawError }),
+        ),
+        failures: [{ target: 'session', error: secondaryRawError }],
+      }),
+    });
+
+    const formatted = err.format();
+    expect(formatted).toContain('Cleanup incomplete: sensitive JSON artifact');
+    expect(formatted).toContain('Verify that no live process owns it');
+    expect(formatted).toContain(`Sensitive JSON cleanup artifact: ${JSON.stringify(artifactPath)}`);
+    expect(formatted).toContain(JSON.stringify(secondaryArtifactPath));
+    expect(formatted).toContain('remove only that exact path');
+    expect(formatted).not.toContain('raw-cleanup-secret');
+    expect(formatted).not.toContain('artifact-validation-secret');
+    expect(formatted).not.toContain('destination-secret');
+    expect(formatted).not.toContain('ESECRETDETAIL');
+
+    const messages = [];
+    const mockLog = {
+      error: (msg) => messages.push({ level: 'error', msg }),
+      dim: (msg) => messages.push({ level: 'dim', msg }),
+    };
+    expect(handleError(err, { log: mockLog, exit: false })).toBe(8);
+    expect(messages.map(({ msg }) => msg).join('\n')).toContain(JSON.stringify(artifactPath));
+
+    const serialized = JSON.stringify(err);
+    expect(JSON.parse(serialized).cleanupFailures).toEqual([{
+      target: 'sensitive JSON artifact',
+      hint: 'Verify that no live process owns it, then remove only the exact artifact path reported below',
+    }]);
+    for (const shape of [serialized, inspect(err), JSON.stringify({ ...err })]) {
+      expect(shape).not.toContain(artifactPath);
+      expect(shape).not.toContain(secondaryArtifactPath);
+      expect(shape).not.toContain('raw-cleanup-secret');
+      expect(shape).not.toContain('secondary-raw-secret');
+      expect(shape).not.toContain('artifact-validation-secret');
+      expect(shape).not.toContain('destination-secret');
+      expect(shape).not.toContain('ESECRETDETAIL');
+      expect(shape).not.toContain('cleanupOutcome');
+      expect(shape).not.toContain('artifactErrors');
+    }
+  });
+
+  it('attaches JSON cleanup fields non-enumerably and merges artifacts across calls', () => {
+    const firstArtifact = { operation: 'remove', path: '/tmp/first.tmp', code: 'EFIRST' };
+    const secondArtifact = { operation: 'inspect', path: '/tmp/second.tmp', code: 'ESECOND' };
+    const firstArtifactError = { path: firstArtifact.path, error: new Error('first-secret') };
+    const secondArtifactError = { path: secondArtifact.path, error: new Error('second-secret') };
+    const rawError = new Error('cleanup failed');
+
+    expect(attachJsonCleanupDetails(
+      rawError,
+      { status: 'pending', destination: '/tmp/state.json', artifacts: [firstArtifact] },
+      [firstArtifactError],
+    )).toBe(rawError);
+    attachJsonCleanupDetails(
+      rawError,
+      { status: 'pending', artifacts: [firstArtifact, secondArtifact] },
+      [secondArtifactError],
+    );
+
+    expect(rawError.cleanupOutcome).toEqual({
+      status: 'pending',
+      destination: '/tmp/state.json',
+      artifacts: [firstArtifact, firstArtifact, secondArtifact],
+    });
+    expect(rawError.artifactErrors).toEqual([firstArtifactError, secondArtifactError]);
+    expect(Object.getOwnPropertyDescriptor(rawError, 'cleanupOutcome')?.enumerable).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(rawError, 'artifactErrors')?.enumerable).toBe(false);
+    expect({ ...rawError }).not.toHaveProperty('cleanupOutcome');
+    expect({ ...rawError }).not.toHaveProperty('artifactErrors');
+
+    const wrapped = new StealthError('wrapped cleanup failed', { cause: rawError });
+    Object.defineProperty(rawError, 'cleanupErrors', {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: [wrapped],
+    });
+    const formatted = wrapped.format();
+    expect(formatted.match(/\/tmp\/first\.tmp/gu)).toHaveLength(1);
+    expect(formatted.match(/\/tmp\/second\.tmp/gu)).toHaveLength(1);
+    for (const shape of [JSON.stringify(wrapped), inspect(wrapped), JSON.stringify({ ...rawError })]) {
+      expect(shape).not.toContain('/tmp/first.tmp');
+      expect(shape).not.toContain('/tmp/second.tmp');
+      expect(shape).not.toContain('first-secret');
+      expect(shape).not.toContain('second-secret');
+    }
+  });
+
+  it('ignores unbranded forged cleanup outcomes', () => {
+    const forgedPath = '/tmp/forged-sensitive-artifact.tmp';
+    const forgedError = new Error('forged cleanup');
+    Object.defineProperty(forgedError, 'cleanupOutcome', {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: { artifacts: [{ path: forgedPath }] },
+    });
+    const err = new ProfileError('profile failed', { cause: forgedError });
+
+    expect(err.format()).not.toContain(forgedPath);
+    expect(err.format()).not.toContain('Sensitive JSON cleanup artifact');
+
+    const messages = [];
+    const mockLog = {
+      error: (msg) => messages.push(msg),
+      dim: (msg) => messages.push(msg),
+    };
+    expect(handleError(err, { log: mockLog, exit: false })).toBe(8);
+    expect(messages.join('\n')).not.toContain(forgedPath);
+  });
+
+  it('quotes artifact path controls so they cannot inject terminal lines', () => {
+    const artifactPath = '/tmp/pending\nINJECTED\r\u001b[31m\u0085NEXT\u2028LAST.tmp';
+    const rawError = attachJsonCleanupDetails(new Error('cleanup failed'), {
+      status: 'pending',
+      artifacts: [{ path: artifactPath }],
+    });
+    const err = new ProfileError('profile failed', { cause: rawError });
+
+    const formatted = err.format();
+    expect(formatted).toContain('\\nINJECTED\\r\\u001b[31m\\u0085NEXT\\u2028LAST.tmp');
+    expect(formatted).not.toContain('\nINJECTED');
+    expect(formatted).not.toContain('\r');
+    expect(formatted).not.toContain('\u001b');
+    expect(formatted).not.toContain('\u0085');
+    expect(formatted).not.toContain('\u2028');
+
+    const unknownError = new Error('unknown cleanup wrapper', { cause: rawError });
+    const messages = [];
+    const mockLog = {
+      error: (msg) => messages.push(msg),
+      dim: (msg) => messages.push(msg),
+    };
+    expect(handleError(unknownError, { log: mockLog, exit: false })).toBe(1);
+    expect(messages.join('\n')).toContain('\\nINJECTED\\r\\u001b[31m\\u0085NEXT\\u2028LAST.tmp');
+    expect(messages.every(msg => !/[\n\r\u001b\u0085\u2028]/u.test(msg))).toBe(true);
+    expect(messages.some(msg => msg.includes('remove only that exact path'))).toBe(true);
   });
 
   it('should serialize and format only sanitized cleanup summaries', () => {

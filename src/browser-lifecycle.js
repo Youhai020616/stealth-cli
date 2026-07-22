@@ -1,6 +1,7 @@
 import {
   captureBrowserState,
   closeBrowser,
+  trackLastKnownUrl,
   writeBrowserStateSnapshot,
 } from './browser.js';
 import { PersistenceError } from './errors.js';
@@ -265,9 +266,7 @@ export function createBrowserLifecycle(handle, opts = {}) {
     if (page !== handle.page && pageIsOpen(handle.page)) return;
     try {
       const url = page.url();
-      if (url && url !== 'about:blank' && handle._meta) {
-        handle._meta.lastKnownUrl = url;
-      }
+      trackLastKnownUrl(handle, url);
     } catch {}
   };
 

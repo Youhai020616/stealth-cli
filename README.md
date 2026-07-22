@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D20-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-381%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-393%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -393,11 +393,13 @@ if (closeError) throw closeError;
 
 `closeBrowser(handle)` is best-effort by default: it attempts persistence and cleanup, then returns `{ persistence, persistenceError, cleanupErrors }` instead of throwing for those failures. Inspect both error fields if you use the default mode. With `{ strict: true }`, cleanup is still attempted, then an exported `PersistenceError` or `BrowserCleanupError` is thrown when work remains incomplete. Persistence is captured at most once; calling `closeBrowser(handle)` again retries only unfinished context, browser, or state-lock cleanup and never recaptures persistence. Fix the reported storage issue before repeating an authentication flow whose final persistence failed, and retry the same handle only for unfinished cleanup before reusing its named profile/session.
 
+A failed `launchBrowser()` performs two bounded rollback attempts. If its error still reports incomplete browser cleanup, retain that original error and call `retryBrowserLaunchCleanup(error, { strict: true })`; the SDK keeps the rollback handle and state lease private and removes the retry capability only after cleanup completes.
+
 Use `checkpointBrowserState(handle)` for manual mid-run persistence on a handle launched with a named profile or session; it reuses the private browser-owned lease. The lower-level `captureSession(name, context, page)` API remains suitable for independently managed contexts, but it cannot acquire a session name already owned by a live `launchBrowser()` handle.
 
-A successful `result.persistence.snapshot` can contain cookie values and the raw last URL, and error objects retain non-enumerable diagnostic fields such as `.cause` or `.url`. Do not log, serialize, or return browser handles or raw close results across trust boundaries. Store `STEALTH_HOME` as sensitive authentication state. Error `toJSON()` output is redacted for routine logging, but the in-memory objects must still be treated as sensitive.
+A successful close result or `checkpointBrowserState(handle)` result can contain cookie values and the raw last URL, and error objects retain non-enumerable diagnostic fields such as `.cause` or `.url`. Do not log, serialize, or return browser handles, checkpoint results, or raw close results across trust boundaries. Store `STEALTH_HOME` as sensitive authentication state. Error `toJSON()` output is redacted for routine logging, but the in-memory objects must still be treated as sensitive.
 
-Atomic state writes also fail closed when a prior process leaves a destination-scoped `.tmp` or `.rollback` artifact. stealth-cli never auto-removes cross-process artifacts: verify that no live process owns the artifact, inspect it, and remove only the exact owner-only path reported by the command before retrying.
+Atomic state writes hold a unique destination-scoped `.claim` from admission through publish or rollback sync. They fail closed when a prior process leaves a strict `.claim`, `.tmp`, or `.rollback` artifact. stealth-cli never auto-removes cross-process artifacts: verify that no live process owns the artifact, inspect it, and remove only the exact owner-only path reported by the command before retrying. This protocol serializes cooperative stealth-cli writers on a coherent local filesystem; owner-only files do not sandbox authentication state from hostile code already running as the same OS user.
 
 ---
 
@@ -440,8 +442,8 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 ```
 Version:     0.6.1
 Commands:    17
-Tests:       381 passing (29 test files)
-Source:      11,324 lines (49 JavaScript files under `src/`)
+Tests:       393 passing (29 test files)
+Source:      11,776 lines (49 JavaScript files under `src/`)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)

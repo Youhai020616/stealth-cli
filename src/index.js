@@ -6,6 +6,7 @@
 export {
   launchBrowser,
   closeBrowser,
+  retryBrowserLaunchCleanup,
   checkpointBrowserState,
   navigate,
   getSnapshot,

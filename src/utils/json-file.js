@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { attachJsonCleanupDetails } from '../errors.js';
 
 const PENDING_JSON_CLEANUPS = new Map();
 const PRIVATE_READ_FLAGS = (
@@ -9,6 +10,15 @@ const PRIVATE_READ_FLAGS = (
   | (fs.constants.O_NONBLOCK || 0)
   | (fs.constants.O_CLOEXEC || 0)
 );
+
+function defineHidden(target, property, value) {
+  Object.defineProperty(target, property, {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value,
+  });
+}
 
 function currentUserId() {
   return typeof process.getuid === 'function' ? process.getuid() : null;
@@ -258,13 +268,107 @@ function cleanupFailure(operation, artifactPath, cause) {
   return error;
 }
 
+function bindJsonDescriptorIdentity(resource) {
+  try {
+    const descriptorStats = fs.fstatSync(resource.descriptor);
+    const pathStats = fs.lstatSync(resource.artifactPath, { throwIfNoEntry: false });
+    if (
+      !descriptorStats.isFile()
+      || !pathStats
+      || !pathStats.isFile()
+      || pathStats.isSymbolicLink()
+      || !hasFileIdentity(pathStats, fileIdentity(descriptorStats))
+    ) {
+      return false;
+    }
+    assertCurrentOwner(descriptorStats, resource.artifactPath);
+    assertCurrentOwner(pathStats, resource.artifactPath);
+    resource.identity = fileIdentity(descriptorStats);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function closeJsonDescriptorResource(resource) {
+  if (resource.descriptorOpen === false) return;
+
+  if (resource.identity) {
+    let stats;
+    try {
+      stats = fs.fstatSync(resource.descriptor);
+    } catch (error) {
+      if (error.code === 'EBADF') {
+        resource.descriptorOpen = false;
+        return;
+      }
+      throw error;
+    }
+    if (!hasFileIdentity(stats, resource.identity)) {
+      const error = new Error(
+        `Sensitive JSON descriptor was reused before cleanup completed: ${resource.artifactPath}`,
+      );
+      error.code = 'ESTATEDESCRIPTORREUSED';
+      throw error;
+    }
+  }
+
+  try {
+    fs.closeSync(resource.descriptor);
+    resource.descriptorOpen = false;
+  } catch (error) {
+    if (error.code === 'EBADF') {
+      resource.descriptorOpen = false;
+      return;
+    }
+    if (!resource.identity && !bindJsonDescriptorIdentity(resource)) {
+      resource.descriptorOpen = false;
+      resource.retryable = false;
+    }
+    throw error;
+  }
+}
+
+function assertOwnedJsonArtifact(resource) {
+  const current = fs.lstatSync(resource.artifactPath, { throwIfNoEntry: false });
+  if (
+    !current
+    || !current.isFile()
+    || current.isSymbolicLink()
+    || !hasFileIdentity(current, resource.identity)
+  ) {
+    throw replacedPathError(resource.artifactPath);
+  }
+  assertCurrentOwner(current, resource.artifactPath);
+  if (process.platform !== 'win32' && (current.mode & 0o777) !== resource.mode) {
+    throw insecurePermissionsError(
+      resource.artifactPath,
+      resource.mode,
+      current.mode & 0o777,
+    );
+  }
+  return current;
+}
+
 function cleanupResource(resource) {
   if (resource.kind === 'descriptor') {
-    try {
-      fs.closeSync(resource.descriptor);
-    } catch (error) {
-      if (error.code !== 'EBADF') throw error;
+    closeJsonDescriptorResource(resource);
+    return;
+  }
+
+  if (resource.kind === 'claim') {
+    if (process.platform === 'win32') closeJsonDescriptorResource(resource);
+    if (resource.pathLinked !== false) {
+      assertOwnedJsonArtifact(resource);
+      fs.unlinkSync(resource.artifactPath);
+      resource.pathLinked = false;
+      resource.removalSyncPending = true;
     }
+    if (resource.removalSyncPending) {
+      syncDirectory(resource.directory);
+      resource.removalSyncPending = false;
+    }
+    if (process.platform !== 'win32') closeJsonDescriptorResource(resource);
     return;
   }
 
@@ -284,29 +388,20 @@ function cleanupResource(resource) {
 function attachJsonCleanupFailures(error, filePath, failures) {
   if (failures.length === 0) return;
   const existing = Array.isArray(error.cleanupFailures) ? error.cleanupFailures : [];
-  Object.defineProperty(error, 'cleanupFailures', {
-    configurable: true,
-    enumerable: false,
-    writable: true,
-    value: [...existing, ...failures],
-  });
-  Object.defineProperty(error, 'cleanupOutcome', {
-    configurable: true,
-    enumerable: false,
-    writable: true,
-    value: {
-      status: 'pending',
-      destination: path.resolve(filePath),
-      artifacts: failures.map(({ operation, artifactPath, error: failure }) => ({
-        operation,
-        path: artifactPath,
-        code: failure.code,
-      })),
-    },
+  defineHidden(error, 'cleanupFailures', [...existing, ...failures]);
+  attachJsonCleanupDetails(error, {
+    status: 'pending',
+    destination: path.resolve(filePath),
+    artifacts: failures.map(({ operation, artifactPath, error: failure }) => ({
+      operation,
+      path: path.resolve(artifactPath),
+      code: failure.code,
+    })),
   });
 }
 
 function retainJsonCleanup(filePath, resource) {
+  if (resource.retryable === false) return;
   const key = path.resolve(filePath);
   const pending = PENDING_JSON_CLEANUPS.get(key) || [];
   pending.push(resource);
@@ -314,7 +409,9 @@ function retainJsonCleanup(filePath, resource) {
 }
 
 function attemptJsonCleanup(filePath, resource, failures) {
-  const operation = resource.kind === 'descriptor' ? 'close' : 'remove';
+  const operation = resource.kind === 'descriptor'
+    ? 'close'
+    : resource.kind === 'claim' ? 'release' : 'remove';
   try {
     cleanupResource(resource);
     return true;
@@ -338,6 +435,10 @@ function drainPendingJsonCleanup(filePath) {
   const failures = [];
   const remaining = [];
   for (const resource of pending) {
+    if (resource.kind === 'claim' && remaining.length > 0) {
+      remaining.push(resource);
+      continue;
+    }
     if (!attemptJsonCleanup(filePath, resource, failures)) remaining.push(resource);
   }
 
@@ -355,24 +456,129 @@ function escapeRegularExpression(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
+function jsonArtifactPath(filePath, suffix) {
+  return path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.${suffix}`,
+  );
+}
+
 function durableJsonArtifactPattern(filePath) {
   const basename = escapeRegularExpression(path.basename(filePath));
   return new RegExp(
-    `^\\.${basename}\\.\\d+\\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\\.(?:tmp|rollback)$`,
+    `^\\.${basename}\\.\\d+\\.[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\\.(?:claim|tmp|rollback)$`,
     'u',
   );
 }
 
-function assertNoDurableJsonArtifacts(filePath, mode) {
+function assertOwnJsonClaim(claim) {
+  if (claim.descriptorOpen === false || claim.pathLinked === false) {
+    throw replacedPathError(claim.artifactPath);
+  }
+  const descriptorStats = fs.fstatSync(claim.descriptor);
+  if (
+    !descriptorStats.isFile()
+    || !hasFileIdentity(descriptorStats, claim.identity)
+  ) {
+    throw replacedPathError(claim.artifactPath);
+  }
+  assertCurrentOwner(descriptorStats, claim.artifactPath);
+  assertOwnedJsonArtifact(claim);
+}
+
+function acquireJsonWriteClaim(filePath, mode) {
+  const directory = path.dirname(filePath);
+  const claimPath = jsonArtifactPath(filePath, 'claim');
+  let descriptor;
+  let claim;
+  const cleanupFailures = [];
+  const cleanupResources = [];
+
+  try {
+    descriptor = fs.openSync(claimPath, 'wx', mode);
+    let stats = fs.fstatSync(descriptor);
+    if (!stats.isFile()) throw unsafePathError(claimPath, 'a regular file');
+    assertCurrentOwner(stats, claimPath);
+    if (process.platform !== 'win32' && (stats.mode & 0o777) !== mode) {
+      fs.fchmodSync(descriptor, mode);
+      stats = fs.fstatSync(descriptor);
+      assertCurrentOwner(stats, claimPath);
+      if ((stats.mode & 0o777) !== mode) {
+        throw insecurePermissionsError(claimPath, mode, stats.mode & 0o777);
+      }
+    }
+    const identity = fileIdentity(stats);
+    claim = {
+      kind: 'claim',
+      descriptor,
+      descriptorOpen: true,
+      pathLinked: true,
+      removalSyncPending: false,
+      artifactPath: claimPath,
+      directory,
+      identity,
+      mode,
+    };
+    fs.writeFileSync(descriptor, `${JSON.stringify({
+      pid: process.pid,
+      createdAt: new Date().toISOString(),
+    })}\n`, 'utf8');
+    fs.fsyncSync(descriptor);
+    assertOwnJsonClaim(claim);
+    syncDirectory(directory);
+    return claim;
+  } catch (error) {
+    if (claim) {
+      if (!attemptJsonCleanup(filePath, claim, cleanupFailures)) {
+        cleanupResources.push(claim);
+      }
+    } else if (descriptor !== undefined) {
+      const resource = {
+        kind: 'descriptor',
+        descriptor,
+        descriptorOpen: true,
+        artifactPath: claimPath,
+      };
+      if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
+        cleanupResources.push(resource);
+      }
+      const inspectionError = cleanupFailure(
+        'verify',
+        claimPath,
+        new Error('The write claim identity could not be established'),
+      );
+      cleanupFailures.push({
+        target: `sensitive-json:${claimPath}`,
+        operation: 'inspect',
+        artifactPath: claimPath,
+        error: inspectionError,
+      });
+    }
+
+    for (const resource of cleanupResources) retainJsonCleanup(filePath, resource);
+    attachJsonCleanupFailures(error, filePath, cleanupFailures);
+    throw error;
+  }
+}
+
+function assertNoDurableJsonArtifacts(filePath, mode, claim) {
+  assertOwnJsonClaim(claim);
   const directory = path.dirname(filePath);
   const pattern = durableJsonArtifactPattern(filePath);
   const artifactNames = fs.readdirSync(directory)
     .filter((name) => pattern.test(name))
     .sort();
+  const ownClaimName = path.basename(claim.artifactPath);
   const findings = [];
+  let ownClaimObserved = false;
 
   for (const name of artifactNames) {
     const artifactPath = path.join(directory, name);
+    if (name === ownClaimName) {
+      ownClaimObserved = true;
+      continue;
+    }
+
     let validationError = null;
     try {
       const stats = fs.lstatSync(artifactPath, { throwIfNoEntry: false });
@@ -391,47 +597,49 @@ function assertNoDurableJsonArtifacts(filePath, mode) {
     findings.push({ artifactPath, validationError });
   }
 
+  if (!ownClaimObserved) {
+    findings.push({
+      artifactPath: claim.artifactPath,
+      validationError: replacedPathError(claim.artifactPath),
+    });
+  }
   if (findings.length === 0) return;
 
-  const artifactPaths = findings.map(({ artifactPath }) => artifactPath);
+  const artifactPaths = findings.map(({ artifactPath }) => path.resolve(artifactPath));
   const error = new Error(
     `Sensitive JSON cleanup is incomplete; inspect these exact owner-only artifacts before retrying: ${artifactPaths.join(', ')}`,
   );
   error.code = 'EJSONCLEANUP';
-  Object.defineProperty(error, 'cleanupOutcome', {
-    configurable: true,
-    enumerable: false,
-    writable: true,
-    value: {
+  attachJsonCleanupDetails(
+    error,
+    {
       status: 'pending',
       destination: path.resolve(filePath),
       artifacts: findings.map(({ artifactPath, validationError }) => ({
         operation: 'inspect',
-        path: artifactPath,
+        path: path.resolve(artifactPath),
         code: validationError?.code || 'EJSONARTIFACTPENDING',
       })),
     },
-  });
-  Object.defineProperty(error, 'artifactErrors', {
-    configurable: true,
-    enumerable: false,
-    writable: true,
-    value: findings
+    findings
       .filter(({ validationError }) => validationError)
       .map(({ artifactPath, validationError }) => ({
-        path: artifactPath,
+        path: path.resolve(artifactPath),
         error: validationError,
       })),
-  });
+  );
   throw error;
 }
 
-function rollbackPublishedWrite(filePath, previousContents, replacementIdentity, mode) {
+function rollbackPublishedWrite(
+  filePath,
+  previousContents,
+  replacementIdentity,
+  mode,
+  claim,
+) {
   const directory = path.dirname(filePath);
-  const rollbackPath = path.join(
-    directory,
-    `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.rollback`,
-  );
+  const rollbackPath = jsonArtifactPath(filePath, 'rollback');
   let rollbackDescriptor;
   let rollbackIdentity;
   let rollbackTempExists = false;
@@ -440,6 +648,7 @@ function rollbackPublishedWrite(filePath, previousContents, replacementIdentity,
   const cleanupResources = [];
 
   try {
+    assertOwnJsonClaim(claim);
     const current = fs.lstatSync(filePath, { throwIfNoEntry: false });
     if (
       current
@@ -470,16 +679,19 @@ function rollbackPublishedWrite(filePath, previousContents, replacementIdentity,
       fs.closeSync(rollbackDescriptor);
       rollbackDescriptor = undefined;
       ensurePrivateFile(rollbackPath, mode, rollbackIdentity);
+      assertOwnJsonClaim(claim);
       fs.renameSync(rollbackPath, filePath);
       rollbackTempExists = false;
       destination = 'restored';
       ensurePrivateFile(filePath, mode, rollbackIdentity);
     } else {
+      assertOwnJsonClaim(claim);
       if (current) fs.unlinkSync(filePath);
       destination = 'absent';
     }
 
     syncDirectory(directory);
+    assertOwnJsonClaim(claim);
     return {
       status: 'succeeded',
       destination,
@@ -491,6 +703,8 @@ function rollbackPublishedWrite(filePath, previousContents, replacementIdentity,
       const resource = {
         kind: 'descriptor',
         descriptor: rollbackDescriptor,
+        descriptorOpen: true,
+        identity: rollbackIdentity,
         artifactPath: rollbackPath,
       };
       if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
@@ -528,30 +742,82 @@ function attachCommitOutcome(error, previousContents, rollback) {
       code: rollback.error.code,
       message: rollback.error.message,
     };
-    error.rollbackError = rollback.error;
+    defineHidden(error, 'rollbackError', rollback.error);
   }
   rollbackDetails.cleanup = rollback.cleanupFailures.length > 0
     ? { status: 'pending', artifacts: rollback.cleanupFailures.length }
     : { status: 'complete', artifacts: 0 };
 
-  error.commitOutcome = {
+  defineHidden(error, 'commitOutcome', {
     status: rollback.status === 'succeeded' ? 'rolled-back' : 'uncertain',
     replacement: 'published',
     previousDestination: previousContents === null ? 'absent' : 'present',
     rollback: rollbackDetails,
+  });
+}
+
+function preserveJsonClaimForRecovery(filePath, claim, error) {
+  const failures = [];
+  const descriptorResource = {
+    kind: 'descriptor',
+    descriptor: claim.descriptor,
+    descriptorOpen: claim.descriptorOpen,
+    identity: claim.identity,
+    artifactPath: claim.artifactPath,
   };
+  if (!attemptJsonCleanup(filePath, descriptorResource, failures)) {
+    retainJsonCleanup(filePath, descriptorResource);
+  }
+  const inspectionError = cleanupFailure(
+    'verify',
+    claim.artifactPath,
+    new Error('The atomic write outcome is uncertain and requires manual inspection'),
+  );
+  failures.push({
+    target: `sensitive-json:${claim.artifactPath}`,
+    operation: 'inspect',
+    artifactPath: claim.artifactPath,
+    error: inspectionError,
+  });
+  attachJsonCleanupFailures(error, filePath, failures);
+  return error;
+}
+
+function releaseJsonWriteClaim(filePath, claim, operationError, committed) {
+  const failures = [];
+  const released = attemptJsonCleanup(filePath, claim, failures);
+  if (!released) retainJsonCleanup(filePath, claim);
+
+  if (failures.length === 0) return operationError;
+
+  const error = operationError || new Error(
+    committed
+      ? 'Sensitive JSON was committed, but write-claim cleanup is incomplete'
+      : 'Sensitive JSON write-claim cleanup is incomplete',
+  );
+  if (!operationError) error.code = 'EJSONCLEANUP';
+  if (committed && !error.commitOutcome) {
+    defineHidden(error, 'commitOutcome', {
+      status: 'committed',
+      replacement: 'published',
+      cleanup: { status: 'pending' },
+    });
+  }
+  attachJsonCleanupFailures(error, filePath, failures);
+  return error;
 }
 
 /**
  * Atomically write sensitive JSON data with owner-only permissions.
  *
- * The temporary file is created in the destination directory so publication
- * remains atomic on the same filesystem. Before creating it, destination-scoped
- * artifacts from incomplete writes in any process block publication until the
+ * A durable, unique write claim is created before reading the destination and
+ * remains open through publication, rollback, and directory sync. Competing or
+ * incomplete destination-scoped claims/temp files block publication until the
  * caller verifies the exact reported path. Failures before publication leave the
  * destination unchanged. Post-publication validation or directory-sync failures
  * trigger an atomic rollback to the prior bytes (or prior absence) and still
- * throw; an uncertain rollback is described on error.commitOutcome.
+ * throw; an uncertain rollback retains its claim and is described on
+ * error.commitOutcome.
  *
  * @param {string} filePath
  * @param {unknown} value
@@ -563,78 +829,96 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
   const directory = path.dirname(filePath);
   drainPendingJsonCleanup(filePath);
   ensurePrivateDirectory(directory);
-  assertNoDurableJsonArtifacts(filePath, mode);
+  const claim = acquireJsonWriteClaim(filePath, mode);
+  let operationError = null;
+  let committed = false;
 
-  const tempPath = path.join(
-    directory,
-    `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
-  );
-  let previousContents = null;
   try {
-    previousContents = readPrivateFile(filePath, { mode });
+    assertNoDurableJsonArtifacts(filePath, mode, claim);
+    assertOwnJsonClaim(claim);
+    const tempPath = jsonArtifactPath(filePath, 'tmp');
+    let previousContents = null;
+    try {
+      previousContents = readPrivateFile(filePath, { mode });
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+
+    let fileDescriptor;
+    let replacementIdentity;
+    let published = false;
+    try {
+      fileDescriptor = fs.openSync(tempPath, 'wx', mode);
+      const replacementStats = fs.fstatSync(fileDescriptor);
+      replacementIdentity = fileIdentity(replacementStats);
+      if (!replacementStats.isFile()) {
+        throw unsafePathError(tempPath, 'a regular file');
+      }
+      assertCurrentOwner(replacementStats, tempPath);
+      fs.writeFileSync(fileDescriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+      fs.fsyncSync(fileDescriptor);
+      fs.closeSync(fileDescriptor);
+      fileDescriptor = undefined;
+
+      ensurePrivateFile(tempPath, mode, replacementIdentity);
+      assertOwnJsonClaim(claim);
+      fs.renameSync(tempPath, filePath);
+      published = true;
+      ensurePrivateFile(filePath, mode, replacementIdentity);
+      syncDirectory(directory);
+      assertOwnJsonClaim(claim);
+      committed = true;
+    } catch (error) {
+      const cleanupFailures = [];
+      const cleanupResources = [];
+
+      if (fileDescriptor !== undefined) {
+        const resource = {
+          kind: 'descriptor',
+          descriptor: fileDescriptor,
+          descriptorOpen: true,
+          identity: replacementIdentity,
+          artifactPath: tempPath,
+        };
+        if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
+          cleanupResources.push(resource);
+        }
+      }
+      if (published) {
+        const rollback = rollbackPublishedWrite(
+          filePath,
+          previousContents,
+          replacementIdentity,
+          mode,
+          claim,
+        );
+        attachCommitOutcome(error, previousContents, rollback);
+        cleanupFailures.push(...rollback.cleanupFailures);
+        cleanupResources.push(...rollback.cleanupResources);
+      }
+      if (replacementIdentity) {
+        const resource = {
+          kind: 'path',
+          artifactPath: tempPath,
+          identity: replacementIdentity,
+        };
+        if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
+          cleanupResources.push(resource);
+        }
+      }
+
+      for (const resource of cleanupResources) retainJsonCleanup(filePath, resource);
+      attachJsonCleanupFailures(error, filePath, cleanupFailures);
+      throw error;
+    }
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    operationError = error;
   }
 
-  let fileDescriptor;
-  let replacementIdentity;
-  let published = false;
-  try {
-    fileDescriptor = fs.openSync(tempPath, 'wx', mode);
-    const replacementStats = fs.fstatSync(fileDescriptor);
-    replacementIdentity = fileIdentity(replacementStats);
-    if (!replacementStats.isFile()) {
-      throw unsafePathError(tempPath, 'a regular file');
-    }
-    assertCurrentOwner(replacementStats, tempPath);
-    fs.writeFileSync(fileDescriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-    fs.fsyncSync(fileDescriptor);
-    fs.closeSync(fileDescriptor);
-    fileDescriptor = undefined;
-
-    ensurePrivateFile(tempPath, mode, replacementIdentity);
-    fs.renameSync(tempPath, filePath);
-    published = true;
-    ensurePrivateFile(filePath, mode, replacementIdentity);
-    syncDirectory(directory);
-  } catch (error) {
-    const cleanupFailures = [];
-    const cleanupResources = [];
-
-    if (fileDescriptor !== undefined) {
-      const resource = {
-        kind: 'descriptor',
-        descriptor: fileDescriptor,
-        artifactPath: tempPath,
-      };
-      if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
-        cleanupResources.push(resource);
-      }
-    }
-    if (published) {
-      const rollback = rollbackPublishedWrite(
-        filePath,
-        previousContents,
-        replacementIdentity,
-        mode,
-      );
-      attachCommitOutcome(error, previousContents, rollback);
-      cleanupFailures.push(...rollback.cleanupFailures);
-      cleanupResources.push(...rollback.cleanupResources);
-    }
-    if (replacementIdentity) {
-      const resource = {
-        kind: 'path',
-        artifactPath: tempPath,
-        identity: replacementIdentity,
-      };
-      if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
-        cleanupResources.push(resource);
-      }
-    }
-
-    for (const resource of cleanupResources) retainJsonCleanup(filePath, resource);
-    attachJsonCleanupFailures(error, filePath, cleanupFailures);
-    throw error;
+  if (operationError?.commitOutcome?.status === 'uncertain') {
+    throw preserveJsonClaimForRecovery(filePath, claim, operationError);
   }
+
+  operationError = releaseJsonWriteClaim(filePath, claim, operationError, committed);
+  if (operationError) throw operationError;
 }

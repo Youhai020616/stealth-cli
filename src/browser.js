@@ -47,14 +47,16 @@ import { assertStateName } from "./utils/storage-paths.js";
 
 const closeStates = new WeakMap();
 const stateLeases = new WeakMap();
+const lastKnownUrls = new WeakMap();
+const launchRollbackHandles = new WeakMap();
 
 function isNonBlankUrl(value) {
   return typeof value === 'string' && value.length > 0 && value !== 'about:blank';
 }
 
-function trackLastKnownUrl(handle, value) {
-  if (isNonBlankUrl(value) && handle?._meta) {
-    handle._meta.lastKnownUrl = value;
+export function trackLastKnownUrl(handle, value) {
+  if (isNonBlankUrl(value) && handle && typeof handle === 'object') {
+    lastKnownUrls.set(handle, value);
   }
 }
 
@@ -224,7 +226,7 @@ export async function launchBrowser(opts = {}) {
         context: null,
         page: null,
         isDaemon: true,
-        _meta: { profileName, sessionName, proxyUrl: null },
+        _meta: { profileName, sessionName },
       };
     }
 
@@ -323,11 +325,9 @@ export async function launchBrowser(opts = {}) {
       _meta: {
         profileName,
         sessionName,
-        proxyUrl: proxyStr,
-        sessionInfo,
-        lastKnownUrl,
       },
     };
+    trackLastKnownUrl(handle, lastKnownUrl);
     stateLeases.set(handle, stateLease);
     return handle;
   } catch (error) {
@@ -347,18 +347,50 @@ export async function launchBrowser(opts = {}) {
     };
     stateLeases.set(rollbackHandle, stateLease);
     let cleanupFailures = [];
-    try {
-      let cleanup = await closeBrowser(rollbackHandle, { persist: false });
-      if (cleanup.cleanupErrors.some(({ target }) => target === 'state-lock')) {
-        cleanup = await closeBrowser(rollbackHandle, { persist: false });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const cleanup = await closeBrowser(rollbackHandle, { persist: false });
+        cleanupFailures = cleanup.cleanupErrors;
+      } catch (cleanupError) {
+        cleanupFailures = [{ target: 'rollback', error: cleanupError }];
       }
-      cleanupFailures = cleanup.cleanupErrors;
-    } catch (cleanupError) {
-      cleanupFailures = [{ target: 'rollback', error: cleanupError }];
+      if (cleanupFailures.length === 0) break;
     }
 
-    throw attachLaunchCleanupFailures(primaryError, cleanupFailures);
+    const finalError = attachLaunchCleanupFailures(primaryError, cleanupFailures);
+    if (cleanupFailures.length > 0) {
+      launchRollbackHandles.set(finalError, rollbackHandle);
+    }
+    throw finalError;
   }
+}
+
+/**
+ * Retry unfinished cleanup from a failed browser launch without exposing the
+ * rollback handle or its private state lease.
+ *
+ * @param {BrowserLaunchError | ProfileError} error - The original launch error
+ * @param {object} [opts]
+ * @param {boolean} [opts.strict=false] - Throw when cleanup remains incomplete
+ * @returns {Promise<{ persistence, persistenceError, cleanupErrors }>}
+ */
+export async function retryBrowserLaunchCleanup(error, opts = {}) {
+  const rollbackHandle = launchRollbackHandles.get(error);
+  if (!rollbackHandle) {
+    throw new BrowserCleanupError(
+      'No pending browser launch cleanup is available for this error',
+      {
+        hint: 'Pass the original launch error only while its rollback cleanup remains incomplete',
+      },
+    );
+  }
+
+  const { strict = false } = opts;
+  const result = await closeBrowser(rollbackHandle, { persist: false, strict });
+  if (result.cleanupErrors.length === 0) {
+    launchRollbackHandles.delete(error);
+  }
+  return result;
 }
 
 /**
@@ -369,7 +401,7 @@ export async function launchBrowser(opts = {}) {
  * @returns {Promise<{ cookies: Array<object>, lastUrl: string | null, capturedAt: string }>}
  */
 export async function captureBrowserState(handle) {
-  const { browser, context, page, isDaemon, _meta } = handle || {};
+  const { browser, context, page, isDaemon } = handle || {};
 
   if (isDaemon || !context) {
     throw new PersistenceError('Cannot capture state from a daemon browser');
@@ -378,14 +410,15 @@ export async function captureBrowserState(handle) {
     throw new PersistenceError('Cannot capture state after the browser disconnected');
   }
 
-  let lastUrl = isNonBlankUrl(_meta?.lastKnownUrl) ? _meta.lastKnownUrl : null;
+  const trackedUrl = lastKnownUrls.get(handle);
+  let lastUrl = isNonBlankUrl(trackedUrl) ? trackedUrl : null;
   if (!lastUrl) {
     let pages = [];
     try {
       pages = typeof context.pages === 'function' ? context.pages() : [];
     } catch {}
     const candidates = [page, ...pages.filter((candidate) => candidate !== page)].filter(Boolean);
-    let blankFallback = _meta?.lastKnownUrl || null;
+    let blankFallback = trackedUrl || null;
     for (const candidate of candidates) {
       try {
         if (typeof candidate.isClosed === 'function' && candidate.isClosed()) continue;
@@ -498,6 +531,9 @@ export async function persistBrowserState(handle) {
 /**
  * Persist a live browser handle through its private state lease without
  * exposing that lease to SDK callers.
+ *
+ * WARNING: The returned result includes raw cookie values and the last URL in
+ * its snapshot. Treat it as sensitive and do not log or expose it.
  */
 export async function checkpointBrowserState(handle) {
   return persistBrowserState(handle);
@@ -590,6 +626,8 @@ async function performCloseOperation(handle, state, persist) {
       cleanupErrors.push({ target: 'state-lock', error });
     }
   }
+
+  if (state.contextClosed && state.browserClosed) lastKnownUrls.delete(handle);
 
   return {
     persistence: state.persistence,

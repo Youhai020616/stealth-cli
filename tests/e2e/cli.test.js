@@ -97,6 +97,52 @@ describe('CLI integration', () => {
     expect(result.stderr).not.toContain(password);
   });
 
+  it('should report exact durable JSON artifacts through command error wrappers', () => {
+    const artifactSecret = 'artifact-content-must-not-leak';
+    const configHome = fs.mkdtempSync(path.join(TEST_STEALTH_HOME, 'config-artifact-home-'));
+    const configDirectory = path.join(configHome, '.stealth');
+    const configArtifact = path.join(
+      configDirectory,
+      '.config.json.999999.33333333-3333-4333-8333-333333333333.tmp',
+    );
+    fs.mkdirSync(configDirectory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(configArtifact, artifactSecret, { mode: 0o600 });
+
+    const configResult = run(['config', 'reset'], { env: { HOME: configHome } });
+
+    const profileHome = path.join(TEST_STEALTH_HOME, 'profile-artifact-home');
+    const profilesDirectory = path.join(profileHome, 'profiles');
+    const profileName = '__artifact_recovery__';
+    const profileArtifact = path.join(
+      profilesDirectory,
+      `.${profileName}.json.999999.44444444-4444-4444-8444-444444444444.rollback`,
+    );
+    fs.mkdirSync(profilesDirectory, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(profileArtifact, artifactSecret, { mode: 0o600 });
+
+    const profileResult = run([
+      'profile',
+      'create',
+      profileName,
+      '--preset',
+      'us-desktop',
+    ], { env: { STEALTH_HOME: profileHome } });
+
+    expect(configResult.exitCode).toBe(1);
+    expect(configResult.stderr).toContain(configArtifact);
+    expect(profileResult.exitCode).toBe(8);
+    expect(profileResult.stderr).toContain(profileArtifact);
+    for (const result of [configResult, profileResult]) {
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toContain('Sensitive JSON cleanup artifact');
+      expect(result.stderr).toContain('remove only that exact path');
+      expect(result.stderr).not.toContain(artifactSecret);
+      expect(result.stderr).not.toMatch(/\n\s*at\s/u);
+      expect(result.stderr).not.toContain('file://');
+      expect(result.stderr).not.toContain('[cause]');
+    }
+  });
+
   it('should show version', () => {
     const { stdout } = run(['--version']);
     expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
