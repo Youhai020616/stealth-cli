@@ -8,6 +8,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   acquireStateLocks,
   ownsStateLock,
+  retryStateLockCleanup,
   withStateLock,
 } from '../../src/utils/state-lock.js';
 import { getStateLocksDir, getStealthHome } from '../../src/utils/storage-paths.js';
@@ -42,8 +43,22 @@ function currentUserId() {
   return typeof process.getuid === 'function' ? process.getuid() : null;
 }
 
+function canonicalStateRoot(root = getStealthHome()) {
+  return fs.realpathSync.native(path.resolve(root));
+}
+
+function statsWithUid(stats, uid) {
+  return new Proxy(stats, {
+    get(current, property) {
+      if (property === 'uid') return uid;
+      const value = Reflect.get(current, property);
+      return typeof value === 'function' ? value.bind(current) : value;
+    },
+  });
+}
+
 function claimRecord(kind, name, opts = {}) {
-  const root = path.resolve(opts.root || getStealthHome());
+  const root = canonicalStateRoot(opts.root || getStealthHome());
   return {
     op: 'claim',
     token: opts.token || crypto.randomUUID(),
@@ -184,7 +199,7 @@ describe('state lock journals', () => {
     expect(readJournalRecords(journalPath)).toEqual([
       expect.objectContaining({
         op: 'claim',
-        root: getStealthHome(),
+        root: canonicalStateRoot(),
         kind: 'profile',
         name: 'work',
         pid: process.pid,
@@ -228,6 +243,65 @@ describe('state lock journals', () => {
     expect(ownsStateLock(lease, 'profile', 'work')).toBe(false);
   });
 
+  it('does not create or validate lock storage when no state target is requested', () => {
+    const parent = temporaryStealthHome('empty-lease');
+    const absentRoot = path.join(parent, 'not-created');
+    const mkdirSync = vi.spyOn(fs, 'mkdirSync');
+    process.env.STEALTH_HOME = absentRoot;
+
+    try {
+      const lease = acquireStateLocks();
+      expect(lease.owns('profile', 'work')).toBe(false);
+      expect(() => lease()).not.toThrow();
+      expect(mkdirSync).not.toHaveBeenCalled();
+      expect(fs.existsSync(absentRoot)).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      process.env.STEALTH_HOME = TEST_STEALTH_HOME;
+    }
+  });
+
+  (process.platform === 'win32' ? it.skip : it)(
+    'uses one physical lock identity through a trusted ancestor alias',
+    () => {
+      const targetParent = temporaryStealthHome('canonical-target');
+      const targetRoot = path.join(targetParent, 'state');
+      fs.mkdirSync(targetRoot, { mode: 0o700 });
+      const linksParent = temporaryStealthHome('canonical-alias');
+      const systemAlias = path.join(linksParent, 'system-alias');
+      fs.symlinkSync(targetParent, systemAlias);
+      const aliasRoot = path.join(systemAlias, 'state');
+      const lstatSync = fs.lstatSync.bind(fs);
+      vi.spyOn(fs, 'lstatSync').mockImplementation((target, ...args) => {
+        const stats = lstatSync(target, ...args);
+        return target === systemAlias ? statsWithUid(stats, 0) : stats;
+      });
+
+      let lease;
+      try {
+        process.env.STEALTH_HOME = aliasRoot;
+        lease = acquireStateLocks({ profile: 'work' });
+        const canonicalRoot = canonicalStateRoot(targetRoot);
+        const journalPath = stateLockPath('profile', 'work', canonicalRoot);
+        expect(readJournalRecords(journalPath)[0]).toMatchObject({
+          op: 'claim',
+          root: canonicalRoot,
+          kind: 'profile',
+          name: 'work',
+        });
+
+        process.env.STEALTH_HOME = canonicalRoot;
+        expect(ownsStateLock(lease, 'profile', 'work')).toBe(true);
+        expect(() => acquireStateLocks({ profile: 'work' })).toThrow('already in use');
+        expect(fs.readdirSync(path.join(canonicalRoot, 'locks'))).toHaveLength(1);
+      } finally {
+        vi.restoreAllMocks();
+        if (lease) lease();
+        process.env.STEALTH_HOME = TEST_STEALTH_HOME;
+      }
+    },
+  );
+
   it('publishes one owner-only journal per target with immutable claim bindings', () => {
     const release = acquireStateLocks({ profile: 'work', session: 'login' });
     const entries = fs.readdirSync(getStateLocksDir(), { withFileTypes: true });
@@ -250,7 +324,7 @@ describe('state lock journals', () => {
       ]);
       expect(claim).toMatchObject({
         op: 'claim',
-        root: getStealthHome(),
+        root: canonicalStateRoot(),
         pid: process.pid,
         hostname: os.hostname(),
         createdAt: expect.any(String),
@@ -322,11 +396,11 @@ describe('state lock journals', () => {
     session();
   });
 
-  it('preserves acquisition errors and attaches rollback failures non-enumerably', () => {
+  it('preserves acquisition errors and retains private rollback recovery across retries', () => {
     const session = acquireStateLocks({ session: 'login' });
     const tokenKinds = new Map();
     const writeSync = fs.writeSync.bind(fs);
-    let rejectedProfileRelease = false;
+    let rejectedProfileReleases = 0;
 
     vi.spyOn(fs, 'writeSync').mockImplementation((descriptor, buffer, ...args) => {
       const record = JSON.parse(buffer.toString('utf8').trim());
@@ -334,10 +408,10 @@ describe('state lock journals', () => {
       if (
         record.op === 'release'
         && tokenKinds.get(record.token) === 'profile'
-        && !rejectedProfileRelease
+        && rejectedProfileReleases < 2
       ) {
-        rejectedProfileRelease = true;
-        const error = new Error('profile release busy');
+        rejectedProfileReleases += 1;
+        const error = new Error(`profile release busy ${rejectedProfileReleases}`);
         error.code = 'EBUSY';
         throw error;
       }
@@ -359,8 +433,37 @@ describe('state lock journals', () => {
     expect(Object.keys(error)).not.toContain('cleanupFailures');
     expect(activeClaims(readJournalRecords(stateLockPath('profile', 'work')))).toHaveLength(1);
 
+    let retryError;
+    try {
+      retryStateLockCleanup(error);
+    } catch (cause) {
+      retryError = cause;
+    }
+    expect(retryError?.message).toContain('profile release busy 2');
+    expect(activeClaims(readJournalRecords(stateLockPath('profile', 'work')))).toHaveLength(1);
+
     vi.restoreAllMocks();
+    expect(() => retryStateLockCleanup(error)).not.toThrow();
+    expect(activeClaims(readJournalRecords(stateLockPath('profile', 'work')))).toEqual([]);
+    expect(() => retryStateLockCleanup(error)).toThrow(
+      'No pending state-lock cleanup is available for this error',
+    );
+    expect(() => retryStateLockCleanup(retryError)).toThrow(
+      'No pending state-lock cleanup is available for this error',
+    );
     session();
+  });
+
+  it('rejects arbitrary, cloned, and serialized cleanup-recovery errors', () => {
+    const arbitrary = new Error('unrelated');
+    const clone = Object.assign(new Error(arbitrary.message), arbitrary);
+    const serialized = JSON.parse(JSON.stringify(arbitrary));
+
+    for (const error of [arbitrary, clone, serialized]) {
+      expect(() => retryStateLockCleanup(error)).toThrow(
+        'No pending state-lock cleanup is available for this error',
+      );
+    }
   });
 
   it('detects path replacement during failed-acquisition release publication', () => {
@@ -972,6 +1075,110 @@ describe('state lock journals', () => {
       return 'real-lock';
     });
     expect(result).toBe('real-lock');
+  });
+
+  it('merges nested temporary-lease recovery without replacing the primary error', () => {
+    const primaryError = new Error('state operation failed');
+    const tokenKinds = new Map();
+    const rejectedKinds = new Set();
+    const writeSync = fs.writeSync.bind(fs);
+    vi.spyOn(fs, 'writeSync').mockImplementation((descriptor, buffer, ...args) => {
+      const record = JSON.parse(buffer.toString('utf8').trim());
+      if (record.op === 'claim') tokenKinds.set(record.token, record.kind);
+      if (record.op === 'release') {
+        const kind = tokenKinds.get(record.token);
+        if (!rejectedKinds.has(kind)) {
+          rejectedKinds.add(kind);
+          const error = new Error(`${kind} temporary lock release failed`);
+          error.code = 'EIO';
+          throw error;
+        }
+      }
+      return writeSync(descriptor, buffer, ...args);
+    });
+
+    let failure;
+    try {
+      withStateLock('profile', 'outer-cleanup', null, () => (
+        withStateLock('session', 'inner-cleanup', null, () => {
+          throw primaryError;
+        })
+      ));
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBe(primaryError);
+    expect(failure.cleanupFailures).toEqual([
+      expect.objectContaining({ target: 'session:inner-cleanup' }),
+      expect.objectContaining({ target: 'profile:outer-cleanup' }),
+    ]);
+    expect(Object.getOwnPropertyDescriptor(failure, 'cleanupFailures')?.enumerable).toBe(false);
+    const innerJournal = stateLockPath('session', 'inner-cleanup');
+    const outerJournal = stateLockPath('profile', 'outer-cleanup');
+    expect(activeClaims(readJournalRecords(innerJournal))).toHaveLength(1);
+    expect(activeClaims(readJournalRecords(outerJournal))).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    expect(() => retryStateLockCleanup(failure)).not.toThrow();
+    expect(activeClaims(readJournalRecords(innerJournal))).toEqual([]);
+    expect(activeClaims(readJournalRecords(outerJournal))).toEqual([]);
+  });
+
+  it('wraps a primitive async rejection when temporary-lease cleanup also fails', async () => {
+    const writeSync = fs.writeSync.bind(fs);
+    let rejectedRelease = false;
+    vi.spyOn(fs, 'writeSync').mockImplementation((descriptor, buffer, ...args) => {
+      const record = JSON.parse(buffer.toString('utf8').trim());
+      if (record.op === 'release' && !rejectedRelease) {
+        rejectedRelease = true;
+        const error = new Error('async temporary lock release failed');
+        error.code = 'EIO';
+        throw error;
+      }
+      return writeSync(descriptor, buffer, ...args);
+    });
+
+    let failure;
+    try {
+      await withStateLock(
+        'session',
+        'async-cleanup',
+        null,
+        () => Promise.reject('primitive operation rejection'),
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'ProfileError',
+      message: 'State operation failed and state-lock cleanup is incomplete',
+      cause: 'primitive operation rejection',
+      cleanupFailures: [expect.objectContaining({ target: 'session:async-cleanup' })],
+    });
+    const journalPath = stateLockPath('session', 'async-cleanup');
+    expect(activeClaims(readJournalRecords(journalPath))).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    expect(() => retryStateLockCleanup(failure)).not.toThrow();
+    expect(activeClaims(readJournalRecords(journalPath))).toEqual([]);
+  });
+
+  it('releases a temporary lease when reading a returned thenable throws', () => {
+    const getterError = new Error('then getter failed');
+    const result = {};
+    Object.defineProperty(result, 'then', {
+      get() {
+        throw getterError;
+      },
+    });
+
+    expect(() => withStateLock('profile', 'thenable-getter', null, () => result))
+      .toThrow(getterError);
+    const records = readJournalRecords(stateLockPath('profile', 'thenable-getter'));
+    expect(records.map(({ op }) => op)).toEqual(['claim', 'release']);
+    expect(activeClaims(records)).toEqual([]);
   });
 
   it('reuses an owning lease and releases short-lived sync and async leases', async () => {

@@ -7,6 +7,7 @@ import {
   ensurePrivateDirectory,
   ensurePrivateFile,
   readPrivateFile,
+  updateJsonAtomic,
   writeJsonAtomic,
 } from '../../src/utils/json-file.js';
 
@@ -211,6 +212,27 @@ describe('private state permissions', () => {
     expect(() => ensurePrivateDirectory(path.join(sharedDirectory, 'state')))
       .toThrow('writable by another user');
   });
+
+  posixIt('does not follow a symlink inserted while creating a private component', () => {
+    const sharedDirectory = temporaryDirectory();
+    const outsideDirectory = temporaryDirectory();
+    fs.chmodSync(sharedDirectory, 0o1777);
+    const privateRoot = path.join(sharedDirectory, 'predictable-root');
+    const nestedDirectory = path.join(privateRoot, 'profiles');
+    const mkdirSync = fs.mkdirSync.bind(fs);
+    let injected = false;
+
+    vi.spyOn(fs, 'mkdirSync').mockImplementation((target, options) => {
+      if (!injected && (target === privateRoot || target === nestedDirectory)) {
+        injected = true;
+        fs.symlinkSync(outsideDirectory, privateRoot);
+      }
+      return mkdirSync(target, options);
+    });
+
+    expect(() => ensurePrivateDirectory(nestedDirectory)).toThrow('must not be a symbolic link');
+    expect(fs.existsSync(path.join(outsideDirectory, 'profiles'))).toBe(false);
+  });
 });
 
 describe('readPrivateFile', () => {
@@ -221,6 +243,16 @@ describe('readPrivateFile', () => {
     fs.writeFileSync(filePath, '{"version":1}\n', { mode: 0o600 });
 
     expect(readPrivateFile(filePath, { encoding: 'utf8' })).toBe('{"version":1}\n');
+  });
+
+  it('fails before opening when the parent directory is absent', () => {
+    const filePath = path.join(temporaryDirectory(), 'missing', 'state.json');
+    const openSpy = vi.spyOn(fs, 'openSync');
+
+    expect(() => readPrivateFile(filePath, { encoding: 'utf8' })).toThrow(
+      'parent directory does not exist',
+    );
+    expect(openSpy).not.toHaveBeenCalled();
   });
 
   posixIt('rejects a pathname replacement that occurs during descriptor reads', () => {
@@ -585,6 +617,108 @@ describe('writeJsonAtomic', () => {
     fs.unlinkSync(claimPath);
     expect(() => writeJsonAtomic(filePath, { version: 4 })).not.toThrow();
     expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 4 });
+  });
+
+  it('abandons an ambiguously closed temp descriptor before same-inode fd reuse', () => {
+    const filePath = temporaryFile();
+    const openSync = fs.openSync.bind(fs);
+    const closeSync = fs.closeSync.bind(fs);
+    let tempDescriptor;
+    let tempPath;
+    let reopenedDescriptor;
+    let tempCloseAttempts = 0;
+    let ambiguousCloseInjected = false;
+
+    vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
+      const descriptor = openSync(target, ...args);
+      if (typeof target === 'string' && target.endsWith('.tmp')) {
+        tempDescriptor = descriptor;
+        tempPath = target;
+      }
+      return descriptor;
+    });
+    vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+      if (descriptor === tempDescriptor) tempCloseAttempts += 1;
+      if (descriptor === tempDescriptor && !ambiguousCloseInjected) {
+        ambiguousCloseInjected = true;
+        closeSync(descriptor);
+        reopenedDescriptor = openSync(tempPath, 'r');
+        const error = new Error('temp close failed after releasing descriptor');
+        error.code = 'EIO';
+        throw error;
+      }
+      return closeSync(descriptor);
+    });
+
+    expect(() => writeJsonAtomic(filePath, { version: 1 }))
+      .toThrow('temp close failed after releasing descriptor');
+    expect(reopenedDescriptor).toBe(tempDescriptor);
+    expect(tempCloseAttempts).toBe(1);
+    expect(fs.fstatSync(reopenedDescriptor).isFile()).toBe(true);
+
+    vi.restoreAllMocks();
+    fs.closeSync(reopenedDescriptor);
+  });
+
+  it('abandons an ambiguously closed rollback descriptor before same-inode fd reuse', () => {
+    const filePath = temporaryFile();
+    writeJsonAtomic(filePath, { version: 1 });
+    const openSync = fs.openSync.bind(fs);
+    const closeSync = fs.closeSync.bind(fs);
+    const fsyncSync = fs.fsyncSync.bind(fs);
+    let rollbackDescriptor;
+    let rollbackPath;
+    let reopenedDescriptor;
+    let directorySyncs = 0;
+    let rollbackCloseAttempts = 0;
+    let ambiguousCloseInjected = false;
+
+    vi.spyOn(fs, 'openSync').mockImplementation((target, ...args) => {
+      const descriptor = openSync(target, ...args);
+      if (typeof target === 'string' && target.endsWith('.rollback')) {
+        rollbackDescriptor = descriptor;
+        rollbackPath = target;
+      }
+      return descriptor;
+    });
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((descriptor) => {
+      if (fs.fstatSync(descriptor).isDirectory()) {
+        directorySyncs += 1;
+        if (directorySyncs >= 2) {
+          const error = new Error('directory sync failed');
+          error.code = 'EIO';
+          throw error;
+        }
+      }
+      return fsyncSync(descriptor);
+    });
+    vi.spyOn(fs, 'closeSync').mockImplementation((descriptor) => {
+      if (descriptor === rollbackDescriptor) rollbackCloseAttempts += 1;
+      if (descriptor === rollbackDescriptor && !ambiguousCloseInjected) {
+        ambiguousCloseInjected = true;
+        closeSync(descriptor);
+        reopenedDescriptor = openSync(rollbackPath, 'r');
+        const error = new Error('rollback close failed after releasing descriptor');
+        error.code = 'EIO';
+        throw error;
+      }
+      return closeSync(descriptor);
+    });
+
+    let failure;
+    try {
+      writeJsonAtomic(filePath, { version: 2 });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure?.commitOutcome?.status).toBe('uncertain');
+    expect(reopenedDescriptor).toBe(rollbackDescriptor);
+    expect(rollbackCloseAttempts).toBe(1);
+    expect(fs.fstatSync(reopenedDescriptor).isFile()).toBe(true);
+
+    vi.restoreAllMocks();
+    fs.closeSync(reopenedDescriptor);
   });
 
   it('fails closed in a new process while a durable temp artifact remains', () => {
@@ -977,5 +1111,57 @@ describe('writeJsonAtomic', () => {
 
     expect(() => writeJsonAtomic(filePath, { version: 1 })).not.toThrow();
     expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ version: 1 });
+  });
+});
+
+describe('updateJsonAtomic', () => {
+  it('holds the durable claim before reading and invoking the updater', () => {
+    const filePath = temporaryFile();
+    const directory = path.dirname(filePath);
+    writeJsonAtomic(filePath, { count: 0 });
+
+    const result = updateJsonAtomic(filePath, (current) => {
+      expect(fs.readdirSync(directory).filter((name) => name.endsWith('.claim')))
+        .toHaveLength(1);
+      expect(() => updateJsonAtomic(filePath, (value) => value))
+        .toThrow('cleanup is incomplete');
+      current.count += 1;
+      return current;
+    });
+
+    expect(result).toEqual({ count: 1 });
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ count: 1 });
+    expect(fs.readdirSync(directory).filter((name) => (
+      name.endsWith('.claim') || name.endsWith('.tmp') || name.endsWith('.rollback')
+    ))).toEqual([]);
+  });
+
+  it('uses an absent-file default and supports a no-publication update', () => {
+    const filePath = temporaryFile();
+    const result = updateJsonAtomic(filePath, (current) => {
+      current.count += 1;
+      return current;
+    }, { createDefault: () => ({ count: 0 }) });
+
+    expect(result).toEqual({ count: 1 });
+    const before = fs.readFileSync(filePath, 'utf8');
+    const identity = fs.statSync(filePath).ino;
+    expect(updateJsonAtomic(filePath, () => undefined)).toBeUndefined();
+    expect(fs.readFileSync(filePath, 'utf8')).toBe(before);
+    expect(fs.statSync(filePath).ino).toBe(identity);
+  });
+
+  it('preserves malformed bytes and rejects asynchronous callbacks', () => {
+    const filePath = temporaryFile();
+    fs.writeFileSync(filePath, '{broken-json', { mode: 0o600 });
+    const before = fs.readFileSync(filePath, 'utf8');
+
+    expect(() => updateJsonAtomic(filePath, (current) => current)).toThrow(SyntaxError);
+    expect(fs.readFileSync(filePath, 'utf8')).toBe(before);
+
+    writeJsonAtomic(filePath, { count: 0 });
+    expect(() => updateJsonAtomic(filePath, async (current) => current))
+      .toThrow('updater must be synchronous');
+    expect(JSON.parse(fs.readFileSync(filePath, 'utf8'))).toEqual({ count: 0 });
   });
 });

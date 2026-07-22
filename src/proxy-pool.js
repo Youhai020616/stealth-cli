@@ -10,7 +10,7 @@ import { ProxyError } from './errors.js';
 import {
   ensurePrivateDirectory,
   readPrivateFile,
-  writeJsonAtomic,
+  updateJsonAtomic,
 } from './utils/json-file.js';
 import {
   isValidProxyUrl,
@@ -50,6 +50,18 @@ function isValidProxyRecord(proxy) {
   );
 }
 
+function createEmptyPool() {
+  return { proxies: [], lastRotateIndex: 0 };
+}
+
+function parseProxyPool(contents) {
+  try {
+    return JSON.parse(contents);
+  } catch (cause) {
+    throw invalidProxyPool(cause);
+  }
+}
+
 function validateProxyPool(data) {
   if (
     !isPlainObject(data)
@@ -73,22 +85,22 @@ function loadData() {
   try {
     contents = readPrivateFile(PROXIES_FILE, { encoding: 'utf8' });
   } catch (error) {
-    if (error.code === 'ENOENT') return { proxies: [], lastRotateIndex: 0 };
+    if (error.code === 'ENOENT') return createEmptyPool();
     throw error;
   }
 
-  let data;
-  try {
-    data = JSON.parse(contents);
-  } catch (cause) {
-    throw invalidProxyPool(cause);
-  }
-  return validateProxyPool(data);
+  return validateProxyPool(parseProxyPool(contents));
 }
 
-function saveData(data) {
+
+
+function updateData(updater) {
   ensureDir();
-  writeJsonAtomic(PROXIES_FILE, validateProxyPool(data));
+  return updateJsonAtomic(PROXIES_FILE, updater, {
+    createDefault: createEmptyPool,
+    parse: parseProxyPool,
+    validate: validateProxyPool,
+  });
 }
 
 /**
@@ -106,46 +118,47 @@ export function addProxy(proxyUrl, opts = {}) {
     throw new ProxyError(proxyUrl, cause);
   }
 
-  const data = loadData();
+  let poolLength;
+  updateData((data) => {
+    if (data.proxies.some((p) => p.url === proxyUrl)) {
+      throw new ProxyError(proxyUrl, new Error('Duplicate proxy'), {
+        message: 'Proxy already exists in pool',
+        hint: 'Remove the existing proxy before adding the same URL again',
+      });
+    }
 
-  // Check for duplicates
-  if (data.proxies.some((p) => p.url === proxyUrl)) {
-    throw new ProxyError(proxyUrl, new Error('Duplicate proxy'), {
-      message: 'Proxy already exists in pool',
-      hint: 'Remove the existing proxy before adding the same URL again',
+    data.proxies.push({
+      url: proxyUrl,
+      label: opts.label || null,
+      region: opts.region || null,
+      addedAt: new Date().toISOString(),
+      lastUsed: null,
+      useCount: 0,
+      lastStatus: null,
+      lastLatency: null,
+      failCount: 0,
     });
-  }
-
-  data.proxies.push({
-    url: proxyUrl,
-    label: opts.label || null,
-    region: opts.region || null,
-    addedAt: new Date().toISOString(),
-    lastUsed: null,
-    useCount: 0,
-    lastStatus: null, // 'ok' | 'fail' | null
-    lastLatency: null, // ms
-    failCount: 0,
+    poolLength = data.proxies.length;
+    return data;
   });
-
-  saveData(data);
-  return data.proxies.length;
+  return poolLength;
 }
 
 /**
  * Remove a proxy from the pool
  */
 export function removeProxy(proxyUrl) {
-  const data = loadData();
-  const idx = data.proxies.findIndex((p) => p.url === proxyUrl || p.label === proxyUrl);
-  if (idx === -1) {
-    throw new ProxyError(proxyUrl, new Error('Proxy not found'), {
-      message: 'Proxy not found in pool',
-      hint: 'Run: stealth proxy list',
-    });
-  }
-  data.proxies.splice(idx, 1);
-  saveData(data);
+  updateData((data) => {
+    const idx = data.proxies.findIndex((p) => p.url === proxyUrl || p.label === proxyUrl);
+    if (idx === -1) {
+      throw new ProxyError(proxyUrl, new Error('Proxy not found'), {
+        message: 'Proxy not found in pool',
+        hint: 'Run: stealth proxy list',
+      });
+    }
+    data.proxies.splice(idx, 1);
+    return data;
+  });
 }
 
 /**
@@ -169,66 +182,64 @@ export function listProxies() {
  * Get the next proxy (round-robin rotation)
  */
 export function getNextProxy() {
-  const data = loadData();
+  let selected = null;
+  updateData((data) => {
+    if (data.proxies.length === 0) return undefined;
 
-  if (data.proxies.length === 0) return null;
+    const available = data.proxies.filter((p) => p.failCount < 5);
+    if (available.length === 0) {
+      data.proxies.forEach((p) => { p.failCount = 0; });
+      selected = data.proxies[0]?.url || null;
+      return data;
+    }
 
-  // Filter out proxies with too many consecutive failures
-  const available = data.proxies.filter((p) => p.failCount < 5);
-  if (available.length === 0) {
-    // Reset all fail counts and try again
-    data.proxies.forEach((p) => { p.failCount = 0; });
-    saveData(data);
-    return data.proxies[0]?.url || null;
-  }
-
-  // Round-robin
-  const idx = data.lastRotateIndex % available.length;
-  const proxy = available[idx];
-
-  // Update stats
-  proxy.lastUsed = new Date().toISOString();
-  proxy.useCount += 1;
-  data.lastRotateIndex = idx + 1;
-
-  saveData(data);
-  return proxy.url;
+    const idx = data.lastRotateIndex % available.length;
+    const proxy = available[idx];
+    proxy.lastUsed = new Date().toISOString();
+    proxy.useCount += 1;
+    data.lastRotateIndex = idx + 1;
+    selected = proxy.url;
+    return data;
+  });
+  return selected;
 }
 
 /**
  * Get a random proxy from the pool
  */
 export function getRandomProxy() {
-  const data = loadData();
-  const available = data.proxies.filter((p) => p.failCount < 5);
-  if (available.length === 0) return null;
+  let selected = null;
+  updateData((data) => {
+    const available = data.proxies.filter((p) => p.failCount < 5);
+    if (available.length === 0) return undefined;
 
-  const proxy = available[Math.floor(Math.random() * available.length)];
-  proxy.lastUsed = new Date().toISOString();
-  proxy.useCount += 1;
-  saveData(data);
-
-  return proxy.url;
+    const proxy = available[Math.floor(Math.random() * available.length)];
+    proxy.lastUsed = new Date().toISOString();
+    proxy.useCount += 1;
+    selected = proxy.url;
+    return data;
+  });
+  return selected;
 }
 
 /**
  * Report proxy success/failure (updates stats)
  */
 export function reportProxy(proxyUrl, success, latencyMs = null) {
-  const data = loadData();
-  const proxy = data.proxies.find((p) => p.url === proxyUrl);
-  if (!proxy) return;
+  updateData((data) => {
+    const proxy = data.proxies.find((p) => p.url === proxyUrl);
+    if (!proxy) return undefined;
 
-  if (success) {
-    proxy.lastStatus = 'ok';
-    proxy.failCount = 0;
-    proxy.lastLatency = latencyMs;
-  } else {
-    proxy.lastStatus = 'fail';
-    proxy.failCount += 1;
-  }
-
-  saveData(data);
+    if (success) {
+      proxy.lastStatus = 'ok';
+      proxy.failCount = 0;
+      proxy.lastLatency = latencyMs;
+    } else {
+      proxy.lastStatus = 'fail';
+      proxy.failCount += 1;
+    }
+    return data;
+  });
 }
 
 /**

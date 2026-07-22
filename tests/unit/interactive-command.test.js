@@ -196,6 +196,67 @@ describe('interactive command', () => {
     expect(log.error).not.toHaveBeenCalled();
   });
 
+  it('preserves the signal exit code when lifecycle persistence rejects', async () => {
+    const lifecycleError = new PersistenceError('final persistence failed');
+    const signalResult = {
+      reason: 'signal',
+      signal: 'SIGINT',
+      exitCode: 130,
+      persistenceIncomplete: true,
+      cleanupErrors: [],
+    };
+    Object.defineProperty(lifecycleError, 'lifecycleResult', {
+      configurable: true,
+      enumerable: false,
+      value: signalResult,
+    });
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'closed',
+      start: vi.fn(),
+      wait: vi.fn().mockRejectedValue(lifecycleError),
+      requestExit: vi.fn().mockRejectedValue(lifecycleError),
+    });
+    const program = new Command();
+    program.exitOverride();
+    registerInteractive(program);
+
+    await program.parseAsync([
+      'interactive',
+      '--profile',
+      'work',
+    ], { from: 'user' });
+
+    expect(process.exitCode).toBe(130);
+    expect(log.error).toHaveBeenCalledWith('Interrupted by SIGINT');
+    expect(log.dim.mock.calls.flat().join('\n')).toContain('Cleanup incomplete: persistence');
+  });
+
+  it('does not swallow a launch-time signal when launch resolves to the daemon', async () => {
+    createLaunchSignalGuard.mockReturnValueOnce({
+      transferTo: vi.fn(),
+      dispose: vi.fn(),
+      pendingSignal: 'SIGTERM',
+      exitCode: 143,
+    });
+    launchBrowser.mockResolvedValueOnce({
+      isDaemon: true,
+      browser: null,
+      context: null,
+      page: null,
+      _meta: {},
+    });
+    const program = new Command();
+    program.exitOverride();
+    registerInteractive(program);
+
+    await program.parseAsync(['interactive'], { from: 'user' });
+
+    expect(process.exitCode).toBe(143);
+    expect(log.error).toHaveBeenCalledWith('Interrupted by SIGTERM');
+    expect(createBrowserLifecycle).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it('should attach and report command-error cleanup failures without replacing the primary error', async () => {
     const rawUrl = 'https://example.com/callback?token=primary-secret';
     const primaryError = new NavigationError(rawUrl, new Error(`failed for ${rawUrl}`));

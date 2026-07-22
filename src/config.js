@@ -7,7 +7,12 @@
 import path from 'path';
 import os from 'os';
 import { ProxyError, StealthError } from './errors.js';
-import { readPrivateFile, writeJsonAtomic } from './utils/json-file.js';
+import {
+  ensurePrivateDirectory,
+  readPrivateFile,
+  updateJsonAtomic,
+  writeJsonAtomic,
+} from './utils/json-file.js';
 import { isValidProxyUrl } from './utils/proxy.js';
 
 const CONFIG_DIR = path.join(os.homedir(), '.stealth');
@@ -42,6 +47,14 @@ function invalidConfigProxy(value, cause = new Error('Invalid proxy URL format')
     message: 'Global configuration contains an invalid proxy URL',
     hint: 'Use an HTTP(S) proxy in the form [http://][user:password@]host[:port], or delete the proxy setting',
   });
+}
+
+function parseConfigContents(contents) {
+  try {
+    return JSON.parse(contents);
+  } catch (cause) {
+    throw invalidConfig('Global configuration file contains malformed JSON', cause);
+  }
 }
 
 function validateConfig(config) {
@@ -80,6 +93,7 @@ export function loadConfig() {
  * Read raw config file
  */
 function readConfigFile() {
+  ensurePrivateDirectory(CONFIG_DIR);
   let contents;
   try {
     contents = readPrivateFile(CONFIG_FILE, { encoding: 'utf8' });
@@ -88,13 +102,7 @@ function readConfigFile() {
     throw error;
   }
 
-  let config;
-  try {
-    config = JSON.parse(contents);
-  } catch (cause) {
-    throw invalidConfig('Global configuration file contains malformed JSON', cause);
-  }
-  return validateConfig(config);
+  return validateConfig(parseConfigContents(contents));
 }
 
 /**
@@ -102,6 +110,14 @@ function readConfigFile() {
  */
 function writeConfigFile(config) {
   writeJsonAtomic(CONFIG_FILE, validateConfig(config));
+}
+
+function updateConfigFile(updater) {
+  return updateJsonAtomic(CONFIG_FILE, updater, {
+    createDefault: () => ({}),
+    parse: parseConfigContents,
+    validate: validateConfig,
+  });
 }
 
 /**
@@ -120,34 +136,36 @@ export function setConfigValue(key, value) {
     throw new Error(`Unknown config key: "${key}". Valid keys: ${VALID_KEYS.join(', ')}`);
   }
 
-  const config = readConfigFile();
+  let coercedValue;
+  updateConfigFile((config) => {
+    coercedValue = value;
+    const defaultVal = DEFAULTS[key];
+    if (typeof defaultVal === 'boolean') {
+      coercedValue = coercedValue === 'true' || coercedValue === true;
+    } else if (typeof defaultVal === 'number') {
+      coercedValue = Number(coercedValue);
+      if (Number.isNaN(coercedValue)) throw new Error(`Invalid number for ${key}`);
+    } else if (coercedValue === 'null' || coercedValue === '') {
+      coercedValue = null;
+    }
+    if (key === 'proxy' && coercedValue !== null && !isValidProxyUrl(coercedValue)) {
+      throw invalidConfigProxy(coercedValue);
+    }
 
-  // Type coercion
-  const defaultVal = DEFAULTS[key];
-  if (typeof defaultVal === 'boolean') {
-    value = value === 'true' || value === true;
-  } else if (typeof defaultVal === 'number') {
-    value = Number(value);
-    if (isNaN(value)) throw new Error(`Invalid number for ${key}`);
-  } else if (value === 'null' || value === '') {
-    value = null;
-  }
-  if (key === 'proxy' && value !== null && !isValidProxyUrl(value)) {
-    throw invalidConfigProxy(value);
-  }
-
-  config[key] = value;
-  writeConfigFile(config);
-  return value;
+    config[key] = coercedValue;
+    return config;
+  });
+  return coercedValue;
 }
 
 /**
  * Delete a config value (reset to default)
  */
 export function deleteConfigValue(key) {
-  const config = readConfigFile();
-  delete config[key];
-  writeConfigFile(config);
+  updateConfigFile((config) => {
+    delete config[key];
+    return config;
+  });
 }
 
 /**

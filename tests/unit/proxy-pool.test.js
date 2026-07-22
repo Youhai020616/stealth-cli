@@ -103,6 +103,14 @@ describe('proxy-pool', () => {
     expect(JSON.stringify(failure)).not.toContain('do-not-leak');
   });
 
+  it('does not replace malformed pool data during a transactional mutation', () => {
+    fs.writeFileSync(PROXIES_FILE, '{broken-pool', { mode: 0o600 });
+    const before = fs.readFileSync(PROXIES_FILE, 'utf8');
+
+    expect(() => addProxy('http://new-proxy:8080')).toThrow('invalid format');
+    expect(fs.readFileSync(PROXIES_FILE, 'utf8')).toBe(before);
+  });
+
   it('should rotate proxies round-robin', () => {
     addProxy('http://a:1');
     addProxy('http://b:2');

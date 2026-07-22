@@ -220,6 +220,48 @@ describe('open command', () => {
     expect(process.exitCode).toBe(143);
   });
 
+  it('preserves the signal exit code when lifecycle persistence rejects', async () => {
+    const lifecycleError = new PersistenceError('final persistence failed');
+    const signalResult = lifecycleResult({
+      reason: 'signal',
+      signal: 'SIGTERM',
+      exitCode: 143,
+      persistenceIncomplete: true,
+    });
+    Object.defineProperty(lifecycleError, 'lifecycleResult', {
+      configurable: true,
+      enumerable: false,
+      value: signalResult,
+    });
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'closed',
+      start: vi.fn(),
+      wait: vi.fn().mockRejectedValue(lifecycleError),
+      requestExit: vi.fn().mockRejectedValue(lifecycleError),
+    });
+
+    let failure;
+    try {
+      await runOpen(undefined, {
+        profile: 'work',
+        checkpointInterval: 1000,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: 'StealthError',
+      code: 143,
+      cause: lifecycleError,
+      lifecycleResult: signalResult,
+    });
+    expect(failure.cleanupFailures).toContainEqual({
+      target: 'persistence',
+      error: lifecycleError,
+    });
+  });
+
   it('should attach command-error cleanup failures to the primary error', async () => {
     const rawUrl = 'https://example.com/callback?token=primary-secret';
     const primaryError = new NavigationError(rawUrl, new Error(`failed for ${rawUrl}`));

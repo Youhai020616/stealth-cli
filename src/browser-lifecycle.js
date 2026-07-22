@@ -4,7 +4,11 @@ import {
   trackLastKnownUrl,
   writeBrowserStateSnapshot,
 } from './browser.js';
-import { PersistenceError } from './errors.js';
+import {
+  PersistenceError,
+  StealthError,
+  attachCleanupFailures,
+} from './errors.js';
 
 export const DEFAULT_CHECKPOINT_INTERVAL = 1000;
 
@@ -60,6 +64,30 @@ export function createLifecyclePersistenceCleanupFailure(result) {
   });
   attachLifecycleResult(error, result);
   return { target: 'persistence', error };
+}
+
+/**
+ * Preserve conventional signal exit semantics when lifecycle finalization
+ * rejects, while retaining the persistence/cleanup error as hidden evidence.
+ */
+export function createLifecycleSignalError(error, cleanupFailures = []) {
+  const result = error?.lifecycleResult;
+  if (!result?.signal) return null;
+
+  const failures = Array.isArray(cleanupFailures) ? [...cleanupFailures] : [];
+  if (
+    (error instanceof PersistenceError || result.persistenceIncomplete)
+    && !failures.some((failure) => failure?.error === error)
+  ) {
+    failures.unshift({ target: 'persistence', error });
+  }
+  const signalError = new StealthError(`Interrupted by ${result.signal}`, {
+    code: result.exitCode || SIGNAL_EXIT_CODES[result.signal] || 1,
+    cause: error,
+  });
+  attachCleanupFailures(signalError, failures);
+  attachLifecycleResult(signalError, result);
+  return signalError;
 }
 
 function deferred() {

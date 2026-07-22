@@ -85,6 +85,31 @@ describe('config', () => {
     expect(() => loadConfig()).toThrow('contains malformed JSON');
   });
 
+  it('hardens a legacy config directory and file during a read-only load', () => {
+    fs.chmodSync(path.dirname(CONFIG_FILE), 0o755);
+    fs.chmodSync(CONFIG_FILE, 0o644);
+
+    loadConfig();
+
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(path.dirname(CONFIG_FILE)).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(CONFIG_FILE).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('does not replace malformed config during transactional mutations', () => {
+    fs.writeFileSync(CONFIG_FILE, '{broken-config', { mode: 0o600 });
+    const before = fs.readFileSync(CONFIG_FILE, 'utf8');
+
+    expect(() => setConfigValue('locale', 'fr-FR')).toThrow('contains malformed JSON');
+    expect(fs.readFileSync(CONFIG_FILE, 'utf8')).toBe(before);
+    expect(() => deleteConfigValue('locale')).toThrow('contains malformed JSON');
+    expect(fs.readFileSync(CONFIG_FILE, 'utf8')).toBe(before);
+
+    resetConfig();
+    expect(loadConfig()).toMatchObject({ locale: 'en-US' });
+  });
+
   it('should reject an invalid proxy already persisted on disk', () => {
     const invalid = 'http://user:do-not-leak@proxy.example:8080/private';
     fs.writeFileSync(CONFIG_FILE, `${JSON.stringify({ proxy: invalid })}\n`, { mode: 0o600 });

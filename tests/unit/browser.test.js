@@ -255,6 +255,35 @@ describe('launchBrowser', () => {
     expect(createBrowser).toHaveBeenCalledWith(expect.objectContaining({ os: 'windows' }));
   });
 
+  it('should reject explicitly empty profile and session names before daemon routing', async () => {
+    isDaemonRunning.mockReturnValue(true);
+
+    await expect(launchBrowser({ profile: '' })).rejects.toThrow('Profile name must contain');
+    await expect(launchBrowser({ session: '' })).rejects.toThrow('Session name must contain');
+
+    expect(isDaemonRunning).not.toHaveBeenCalled();
+    expect(acquireStateLocks).not.toHaveBeenCalled();
+    expect(createBrowser).not.toHaveBeenCalled();
+  });
+
+  it('should preserve state-lock acquisition error identity for private cleanup recovery', async () => {
+    const lockError = new ProfileError('state-lock acquisition failed');
+    acquireStateLocks.mockImplementationOnce(() => {
+      throw lockError;
+    });
+
+    let failure;
+    try {
+      await launchBrowser({ profile: 'work' });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBe(lockError);
+    expect(loadProfile).not.toHaveBeenCalled();
+    expect(createBrowser).not.toHaveBeenCalled();
+  });
+
   it('should skip daemon when proxy is specified', async () => {
     isDaemonRunning.mockReturnValue(true);
     setupMockBrowser();

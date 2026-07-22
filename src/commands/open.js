@@ -13,6 +13,7 @@ import {
   createBrowserLifecycle,
   createLaunchSignalGuard,
   createLifecyclePersistenceCleanupFailure,
+  createLifecycleSignalError,
   DEFAULT_CHECKPOINT_INTERVAL,
 } from '../browser-lifecycle.js';
 import {
@@ -55,7 +56,10 @@ function reportLifecycleResult(result, hasPersistenceTarget) {
     const suffix = result.persistedAt
       ? ` (latest durable checkpoint: ${result.persistedAt})`
       : '';
-    log.warn(`Browser closed before a final live snapshot; retained the latest durable checkpoint${suffix}`);
+    const reason = result.finalPersistenceError
+      ? 'Final browser snapshot could not be saved'
+      : 'Browser closed before a final live snapshot';
+    log.warn(`${reason}; retained the latest durable checkpoint${suffix}`);
   } else if (hasPersistenceTarget && result.persistedAt) {
     const profileCount = result.persistence?.profile?.cookies;
     const sessionCount = result.persistence?.session?.cookies;
@@ -200,13 +204,18 @@ export async function runOpen(positionalUrl, opts) {
     }
 
     attachCleanupFailures(error, cleanupFailures.slice(inheritedCleanupFailures.length));
-    const primaryError = pendingSignal && !lifecycle
+    const lifecycleSignalError = lifecycle
+      ? createLifecycleSignalError(error, cleanupFailures)
+      : null;
+    const primaryError = lifecycleSignalError || (pendingSignal && !lifecycle
       ? new StealthError(`Interrupted by ${pendingSignal}`, {
         code: signalGuard.exitCode,
         cause: error,
       })
-      : error;
-    if (primaryError !== error) attachCleanupFailures(primaryError, cleanupFailures);
+      : error);
+    if (primaryError !== error && !lifecycleSignalError) {
+      attachCleanupFailures(primaryError, cleanupFailures);
+    }
     throw primaryError;
   }
 }

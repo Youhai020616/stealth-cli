@@ -22,6 +22,9 @@ export {
   hoverRef,
 } from "./browser.js";
 
+// Browser state cleanup recovery
+export { retryStateLockCleanup } from "./utils/state-lock.js";
+
 // Errors
 export {
   StealthError,

@@ -24,6 +24,7 @@ import {
   createBrowserLifecycle,
   createLaunchSignalGuard,
   createLifecyclePersistenceCleanupFailure,
+  createLifecycleSignalError,
 } from "../browser-lifecycle.js";
 import { expandMacro, getSupportedEngines } from "../macros.js";
 import {
@@ -106,9 +107,10 @@ export function registerInteractive(program) {
       const signalGuard = createLaunchSignalGuard();
       const applyLifecycleResult = (result) => {
         if (result.usedCheckpointFallback && result.persistedAt) {
-          log.warn(
-            `Browser closed before a final live snapshot; using checkpoint from ${result.persistedAt}`,
-          );
+          const reason = result.finalPersistenceError
+            ? 'Final browser snapshot could not be saved'
+            : 'Browser closed before a final live snapshot';
+          log.warn(`${reason}; using checkpoint from ${result.persistedAt}`);
         }
         if (result.persistenceIncomplete) {
           const persistenceFailure = createLifecyclePersistenceCleanupFailure(result);
@@ -146,7 +148,19 @@ export function registerInteractive(program) {
           });
           signalGuard.transferTo(lifecycle);
         } else {
+          const pendingSignal = signalGuard.pendingSignal;
+          const signalExitCode = signalGuard.exitCode;
           signalGuard.dispose();
+          if (pendingSignal) {
+            spinner.stop();
+            process.exitCode = handleError(
+              new StealthError(`Interrupted by ${pendingSignal}`, {
+                code: signalExitCode,
+              }),
+              { log, exit: false },
+            );
+            return;
+          }
         }
 
         if (opts.cookies && !handle.isDaemon && lifecycle.phase === "running") {
@@ -531,7 +545,10 @@ export function registerInteractive(program) {
           err,
           cleanupFailures.slice(inheritedCleanupFailures.length),
         );
-        const handledError = signalGuard.pendingSignal && !lifecycle
+        const lifecycleSignalError = lifecycle
+          ? createLifecycleSignalError(err, cleanupFailures)
+          : null;
+        const handledError = lifecycleSignalError || (signalGuard.pendingSignal && !lifecycle
           ? attachCleanupFailures(
             new StealthError(`Interrupted by ${signalGuard.pendingSignal}`, {
               code: signalGuard.exitCode,
@@ -539,7 +556,7 @@ export function registerInteractive(program) {
             }),
             cleanupFailures,
           )
-          : err;
+          : err);
         process.exitCode = handleError(handledError, { log, exit: false });
       }
     });

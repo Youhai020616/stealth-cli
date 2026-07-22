@@ -10,6 +10,7 @@ import { assertStateName, getStealthHome } from './storage-paths.js';
 const STATE_KINDS = new Set(['profile', 'session']);
 const TOKEN_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const STATE_LEASE_RECORDS = new WeakMap();
+const PENDING_STATE_LOCK_CLEANUPS = new WeakMap();
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
 
 // Journals are deliberately never compacted or replaced: doing so would
@@ -36,6 +37,10 @@ const CREATE_OPEN_FLAGS = (
 
 function currentUserId() {
   return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function isObjectLike(value) {
+  return Boolean(value && (typeof value === 'object' || typeof value === 'function'));
 }
 
 function targetFor(kind, name, root = getStealthHome()) {
@@ -152,6 +157,28 @@ function attachStateCleanupFailures(error, failures) {
   } catch {
     // Cleanup diagnostics must never replace a primitive or non-extensible primary error.
   }
+}
+
+function resolveValidatedStateLockRoot(configuredRoot) {
+  const root = path.resolve(configuredRoot);
+  try {
+    ensurePrivateDirectory(root);
+    const stats = fs.lstatSync(root);
+    if (!stats.isDirectory() || stats.isSymbolicLink()) throw unsafePathError(root);
+    return fs.realpathSync.native(root);
+  } catch (cause) {
+    throw new ProfileError('Browser state lock storage is not private', {
+      hint: `Fix permissions, ownership, and path types for: ${root}`,
+      cause,
+    });
+  }
+}
+
+function canonicalizeTarget(target, canonicalRoot = resolveValidatedStateLockRoot(target.root)) {
+  return Object.freeze({
+    ...target,
+    root: canonicalRoot,
+  });
 }
 
 function ensureLocksDir(root) {
@@ -795,6 +822,110 @@ function createRelease(record) {
   };
 }
 
+function releaseStateLockRecords(records) {
+  const failures = [];
+  const failedRecords = [];
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    try {
+      record.lock.release();
+    } catch (cause) {
+      const error = isObjectLike(cause)
+        ? cause
+        : new ProfileError('State-lock cleanup failed with a non-error value', { cause });
+      failures.push(cleanupEntry(record.target, error));
+      failedRecords.unshift(record);
+    }
+  }
+  return { failures, failedRecords };
+}
+
+function retainStateLockCleanup(error, failedRecords) {
+  if (!isObjectLike(error) || failedRecords.length === 0) return;
+  const recovery = PENDING_STATE_LOCK_CLEANUPS.get(error) || { records: [] };
+  for (const record of failedRecords) {
+    if (!recovery.records.includes(record)) recovery.records.push(record);
+  }
+  PENDING_STATE_LOCK_CLEANUPS.set(error, recovery);
+}
+
+function adoptStateLockCleanup(primaryError, cleanupError) {
+  if (!isObjectLike(primaryError) || !isObjectLike(cleanupError)) return;
+  const incoming = PENDING_STATE_LOCK_CLEANUPS.get(cleanupError);
+  if (!incoming) return;
+
+  const existing = PENDING_STATE_LOCK_CLEANUPS.get(primaryError);
+  if (!existing) {
+    PENDING_STATE_LOCK_CLEANUPS.set(primaryError, incoming);
+    return;
+  }
+  if (existing === incoming) return;
+
+  for (const record of incoming.records) {
+    if (!existing.records.includes(record)) existing.records.push(record);
+  }
+  PENDING_STATE_LOCK_CLEANUPS.set(cleanupError, existing);
+}
+
+function attachTemporaryLeaseFailure(primaryError, target, cleanupError) {
+  const error = isObjectLike(primaryError)
+    ? primaryError
+    : new ProfileError('State operation failed and state-lock cleanup is incomplete', {
+      cause: primaryError,
+    });
+  adoptStateLockCleanup(error, cleanupError);
+  attachStateCleanupFailures(error, [cleanupEntry(target, cleanupError)]);
+  return error;
+}
+
+function createStateLease(records) {
+  const heldRecords = Object.freeze(records.slice());
+  const lease = () => {
+    const release = releaseStateLockRecords(heldRecords);
+    if (release.failures.length === 0) return;
+
+    const firstError = release.failures[0].error;
+    attachStateCleanupFailures(firstError, release.failures.slice(1));
+    retainStateLockCleanup(firstError, release.failedRecords);
+    throw firstError;
+  };
+  STATE_LEASE_RECORDS.set(lease, heldRecords);
+  lease.owns = (kind, name) => ownsStateLock(lease, kind, name);
+  return lease;
+}
+
+/**
+ * Retry state-lock cleanup retained behind the exact error object that exposed
+ * the incomplete cleanup. Leases and lock records remain module-private.
+ *
+ * @param {unknown} error
+ * @returns {void}
+ */
+export function retryStateLockCleanup(error) {
+  const recovery = isObjectLike(error) ? PENDING_STATE_LOCK_CLEANUPS.get(error) : null;
+  if (!recovery || !Array.isArray(recovery.records) || recovery.records.length === 0) {
+    throw new ProfileError(
+      'No pending state-lock cleanup is available for this error',
+      {
+        hint: 'Pass the original error object only while its state-lock cleanup remains incomplete',
+      },
+    );
+  }
+
+  const release = releaseStateLockRecords(recovery.records.slice());
+  recovery.records = release.failedRecords.slice();
+  if (release.failures.length === 0) {
+    PENDING_STATE_LOCK_CLEANUPS.delete(error);
+    return;
+  }
+
+  const retryError = release.failures[0].error;
+  attachStateCleanupFailures(retryError, release.failures.slice(1));
+  PENDING_STATE_LOCK_CLEANUPS.set(error, recovery);
+  PENDING_STATE_LOCK_CLEANUPS.set(retryError, recovery);
+  throw retryError;
+}
+
 function acquireLock(target) {
   ensureLocksDir(target.root);
   const journalPath = lockPath(target);
@@ -838,38 +969,16 @@ function acquireLock(target) {
         { hint: manualRemovalHint(journalPath), cause },
       );
     const cleanupFailures = [];
-    const rollbackInspectionJournals = [];
 
     if (opened && claimAppended && !acquired) {
-      try {
-        if (journalPathStatus(opened) === 'same') {
-          appendRecord(target, opened, releaseRecord(token));
-          if (journalPathStatus(opened) !== 'same') {
-            inspectDetachedJournalPath(
-              { target, token, opened },
-              { retainOpened: (current) => rollbackInspectionJournals.push(current) },
-            );
-          }
-        }
-      } catch (cleanupError) {
-        cleanupFailures.push(cleanupEntry(target, releaseFailure(
-          target,
-          opened.journalPath,
-          cleanupError,
-        )));
-      }
-    }
-
-    for (const currentOpened of rollbackInspectionJournals) {
-      try {
-        closeOpenedJournal(currentOpened);
-      } catch (cleanupError) {
-        cleanupFailures.push(cleanupEntry(target, closeFailure(
-          target,
-          currentOpened.journalPath,
-          cleanupError,
-        )));
-      }
+      const rollbackRecord = Object.freeze({
+        target,
+        lock: createRelease({ target, token, opened }),
+      });
+      const rollback = releaseStateLockRecords([rollbackRecord]);
+      opened = undefined;
+      cleanupFailures.push(...rollback.failures);
+      retainStateLockCleanup(failure, rollback.failedRecords);
     }
 
     if (opened) {
@@ -924,47 +1033,23 @@ export function acquireStateLocks(opts = {}) {
     targets.push(targetFor('session', opts.session, root));
   }
   targets.sort((a, b) => `${a.kind}:${a.name}`.localeCompare(`${b.kind}:${b.name}`));
+  if (targets.length === 0) return createStateLease([]);
 
+  const canonicalRoot = resolveValidatedStateLockRoot(root);
+  const canonicalTargets = targets.map((target) => canonicalizeTarget(target, canonicalRoot));
   const acquiredRecords = [];
   try {
-    for (const target of targets) {
+    for (const target of canonicalTargets) {
       acquiredRecords.push(Object.freeze({ target, lock: acquireLock(target) }));
     }
   } catch (error) {
-    const cleanupFailures = [];
-    for (let index = acquiredRecords.length - 1; index >= 0; index -= 1) {
-      try {
-        acquiredRecords[index].lock.release();
-      } catch (cleanupError) {
-        cleanupFailures.push(cleanupEntry(acquiredRecords[index].target, cleanupError));
-      }
-    }
-    attachStateCleanupFailures(error, cleanupFailures);
+    const release = releaseStateLockRecords(acquiredRecords);
+    attachStateCleanupFailures(error, release.failures);
+    retainStateLockCleanup(error, release.failedRecords);
     throw error;
   }
 
-  const records = Object.freeze(acquiredRecords.slice());
-  const lease = () => {
-    let firstError;
-    const cleanupFailures = [];
-    for (let index = records.length - 1; index >= 0; index -= 1) {
-      try {
-        records[index].lock.release();
-      } catch (error) {
-        if (!firstError) firstError = error;
-        else cleanupFailures.push(cleanupEntry(records[index].target, error));
-      }
-    }
-    if (firstError) {
-      attachStateCleanupFailures(firstError, cleanupFailures);
-      throw firstError;
-    }
-  };
-
-  STATE_LEASE_RECORDS.set(lease, records);
-  lease.owns = (kind, name) => ownsStateLock(lease, kind, name);
-
-  return lease;
+  return createStateLease(acquiredRecords);
 }
 
 /**
@@ -977,11 +1062,13 @@ export function acquireStateLocks(opts = {}) {
  * @returns {boolean}
  */
 export function ownsStateLock(lease, kind, name) {
-  if (!STATE_KINDS.has(kind)) return false;
+  if (!STATE_KINDS.has(kind) || !isObjectLike(lease)) return false;
+  const records = STATE_LEASE_RECORDS.get(lease);
+  if (!records || records.length === 0) return false;
 
   let target;
   try {
-    target = targetFor(kind, name);
+    target = canonicalizeTarget(targetFor(kind, name));
   } catch {
     return false;
   }
@@ -1000,10 +1087,10 @@ export function ownsStateLock(lease, kind, name) {
  * @returns {T}
  */
 export function withStateLock(kind, name, lease, callback) {
-  const target = targetFor(kind, name);
   if (typeof callback !== 'function') {
     throw new TypeError('State lock callback must be a function');
   }
+  const target = canonicalizeTarget(targetFor(kind, name));
 
   if (leaseOwnsTarget(lease, target)) {
     return callback(lease);
@@ -1011,18 +1098,20 @@ export function withStateLock(kind, name, lease, callback) {
 
   const activeLease = acquireStateLocks({ [target.kind]: target.name });
   let result;
+  let isThenable = false;
   try {
     result = callback(activeLease);
+    isThenable = isObjectLike(result) && typeof result.then === 'function';
   } catch (error) {
     try {
       activeLease();
     } catch (cleanupError) {
-      attachStateCleanupFailures(error, [cleanupEntry(target, cleanupError)]);
+      throw attachTemporaryLeaseFailure(error, target, cleanupError);
     }
     throw error;
   }
 
-  if (result && typeof result.then === 'function') {
+  if (isThenable) {
     return Promise.resolve(result).then(
       (value) => {
         activeLease();
@@ -1032,7 +1121,7 @@ export function withStateLock(kind, name, lease, callback) {
         try {
           activeLease();
         } catch (cleanupError) {
-          attachStateCleanupFailures(error, [cleanupEntry(target, cleanupError)]);
+          throw attachTemporaryLeaseFailure(error, target, cleanupError);
         }
         throw error;
       },

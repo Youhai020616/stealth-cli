@@ -67,6 +67,12 @@ function changedFileError(targetPath) {
   return error;
 }
 
+function missingParentError(targetPath) {
+  const error = new Error(`Sensitive state parent directory does not exist: ${targetPath}`);
+  error.code = 'ENOENT';
+  return error;
+}
+
 function assertCurrentOwner(stats, targetPath) {
   if (process.platform === 'win32') return;
   const userId = currentUserId();
@@ -140,17 +146,42 @@ function assertTrustedDirectoryPath(directory) {
  * aliases are accepted only when every expanded target component is trusted.
  * Hostile code running as this same uid remains outside the storage boundary.
  */
-function assertSafeDirectoryAncestors(targetPath) {
+function assertSafeDirectoryAncestors(targetPath, opts = {}) {
   if (process.platform === 'win32') return;
 
-  let existing = path.dirname(path.resolve(targetPath));
-  while (!fs.lstatSync(existing, { throwIfNoEntry: false })) {
+  const parentPath = path.dirname(path.resolve(targetPath));
+  let existing = parentPath;
+  let stats = fs.lstatSync(existing, { throwIfNoEntry: false });
+  if (!stats && opts.requireParent) throw missingParentError(parentPath);
+
+  while (!stats) {
     const parent = path.dirname(existing);
     if (parent === existing) break;
     existing = parent;
+    stats = fs.lstatSync(existing, { throwIfNoEntry: false });
   }
 
   assertTrustedDirectoryPath(existing);
+}
+
+function missingDirectoryComponents(directory) {
+  const resolved = path.resolve(directory);
+  const missing = [];
+  let existing = resolved;
+  let stats = fs.lstatSync(existing, { throwIfNoEntry: false });
+
+  while (!stats) {
+    missing.unshift(existing);
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+    stats = fs.lstatSync(existing, { throwIfNoEntry: false });
+  }
+
+  if (process.platform !== 'win32') {
+    assertTrustedDirectoryPath(missing.length > 0 ? existing : path.dirname(resolved));
+  }
+  return missing;
 }
 
 function enforcePrivateMode(targetPath, mode) {
@@ -176,12 +207,23 @@ function enforcePrivateMode(targetPath, mode) {
 }
 
 export function ensurePrivateDirectory(directory) {
-  assertSafeDirectoryAncestors(directory);
-  let stats = fs.lstatSync(directory, { throwIfNoEntry: false });
-  if (!stats) {
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    stats = fs.lstatSync(directory);
+  const missing = missingDirectoryComponents(directory);
+  for (const component of missing) {
+    try {
+      fs.mkdirSync(component, { mode: 0o700 });
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+
+    const created = fs.lstatSync(component);
+    if (!created.isDirectory() || created.isSymbolicLink()) {
+      throw unsafePathError(component, 'a directory');
+    }
+    assertCurrentOwner(created, component);
+    enforcePrivateMode(component, 0o700);
   }
+
+  let stats = fs.lstatSync(directory);
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw unsafePathError(directory, 'a directory');
   }
@@ -190,11 +232,11 @@ export function ensurePrivateDirectory(directory) {
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw unsafePathError(directory, 'a directory');
   }
-  assertSafeDirectoryAncestors(directory);
+  assertSafeDirectoryAncestors(directory, { requireParent: true });
 }
 
 export function ensurePrivateFile(filePath, mode = 0o600, expectedIdentity = null) {
-  assertSafeDirectoryAncestors(filePath);
+  assertSafeDirectoryAncestors(filePath, { requireParent: true });
   let stats = fs.lstatSync(filePath);
   if (!stats.isFile() || stats.isSymbolicLink()) {
     throw unsafePathError(filePath, 'a regular file');
@@ -263,7 +305,7 @@ function validateOpenedPrivateFile(descriptor, filePath, mode) {
  */
 export function readPrivateFile(filePath, opts = {}) {
   const { encoding = null, mode = 0o600 } = opts;
-  assertSafeDirectoryAncestors(filePath);
+  assertSafeDirectoryAncestors(filePath, { requireParent: true });
   let descriptor;
   let contents;
   let failure;
@@ -708,7 +750,7 @@ function rollbackPublishedWrite(
 ) {
   const directory = path.dirname(filePath);
   const rollbackPath = jsonArtifactPath(filePath, 'rollback');
-  let rollbackDescriptor;
+  let rollbackDescriptorResource;
   let rollbackIdentity;
   let rollbackTempExists = false;
   let destination = 'replacement';
@@ -734,18 +776,25 @@ function rollbackPublishedWrite(
     }
 
     if (previousContents !== null) {
-      rollbackDescriptor = fs.openSync(rollbackPath, 'wx', mode);
+      const rollbackDescriptor = fs.openSync(rollbackPath, 'wx', mode);
+      rollbackDescriptorResource = {
+        kind: 'descriptor',
+        descriptor: rollbackDescriptor,
+        descriptorOpen: true,
+        identity: null,
+        artifactPath: rollbackPath,
+      };
       rollbackTempExists = true;
       const rollbackStats = fs.fstatSync(rollbackDescriptor);
       rollbackIdentity = fileIdentity(rollbackStats);
+      rollbackDescriptorResource.identity = rollbackIdentity;
       if (!rollbackStats.isFile()) {
         throw unsafePathError(rollbackPath, 'a regular file');
       }
       assertCurrentOwner(rollbackStats, rollbackPath);
       fs.writeFileSync(rollbackDescriptor, previousContents);
       fs.fsyncSync(rollbackDescriptor);
-      fs.closeSync(rollbackDescriptor);
-      rollbackDescriptor = undefined;
+      closeJsonDescriptorResource(rollbackDescriptorResource);
       ensurePrivateFile(rollbackPath, mode, rollbackIdentity);
       assertOwnJsonClaim(claim);
       fs.renameSync(rollbackPath, filePath);
@@ -767,16 +816,9 @@ function rollbackPublishedWrite(
       cleanupResources,
     };
   } catch (error) {
-    if (rollbackDescriptor !== undefined) {
-      const resource = {
-        kind: 'descriptor',
-        descriptor: rollbackDescriptor,
-        descriptorOpen: true,
-        identity: rollbackIdentity,
-        artifactPath: rollbackPath,
-      };
-      if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
-        cleanupResources.push(resource);
+    if (rollbackDescriptorResource && rollbackDescriptorResource.descriptorOpen !== false) {
+      if (!attemptJsonCleanup(filePath, rollbackDescriptorResource, cleanupFailures)) {
+        cleanupResources.push(rollbackDescriptorResource);
       }
     }
     if (rollbackTempExists && rollbackIdentity) {
@@ -875,110 +917,119 @@ function releaseJsonWriteClaim(filePath, claim, operationError, committed) {
   return error;
 }
 
-/**
- * Atomically write sensitive JSON data with owner-only permissions.
- *
- * A durable, unique write claim is created before reading the destination and
- * remains open through publication, rollback, and directory sync. Competing or
- * incomplete destination-scoped claims/temp files block publication until the
- * caller verifies the exact reported path. Failures before publication leave the
- * destination unchanged. Post-publication validation or directory-sync failures
- * trigger an atomic rollback to the prior bytes (or prior absence) and still
- * throw; an uncertain rollback retains its claim and is described on
- * error.commitOutcome.
- *
- * @param {string} filePath
- * @param {unknown} value
- * @param {object} [opts]
- * @param {number} [opts.mode=0o600]
- */
-export function writeJsonAtomic(filePath, value, opts = {}) {
+function readClaimedJsonSnapshot(transaction) {
+  assertOwnJsonClaim(transaction.claim);
+  try {
+    transaction.previousContents = readPrivateFile(transaction.filePath, {
+      mode: transaction.mode,
+    });
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    transaction.previousContents = null;
+  }
+  assertOwnJsonClaim(transaction.claim);
+}
+
+function publishClaimedJson(transaction, value) {
+  const {
+    filePath,
+    directory,
+    mode,
+    claim,
+    previousContents,
+  } = transaction;
+  const tempPath = jsonArtifactPath(filePath, 'tmp');
+  let descriptorResource;
+  let replacementIdentity;
+  let published = false;
+
+  try {
+    const fileDescriptor = fs.openSync(tempPath, 'wx', mode);
+    descriptorResource = {
+      kind: 'descriptor',
+      descriptor: fileDescriptor,
+      descriptorOpen: true,
+      identity: null,
+      artifactPath: tempPath,
+    };
+    const replacementStats = fs.fstatSync(fileDescriptor);
+    replacementIdentity = fileIdentity(replacementStats);
+    descriptorResource.identity = replacementIdentity;
+    if (!replacementStats.isFile()) {
+      throw unsafePathError(tempPath, 'a regular file');
+    }
+    assertCurrentOwner(replacementStats, tempPath);
+    fs.writeFileSync(fileDescriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    fs.fsyncSync(fileDescriptor);
+    closeJsonDescriptorResource(descriptorResource);
+
+    ensurePrivateFile(tempPath, mode, replacementIdentity);
+    assertOwnJsonClaim(claim);
+    fs.renameSync(tempPath, filePath);
+    published = true;
+    ensurePrivateFile(filePath, mode, replacementIdentity);
+    syncDirectory(directory);
+    assertOwnJsonClaim(claim);
+    transaction.committed = true;
+  } catch (error) {
+    const cleanupFailures = [];
+    const cleanupResources = [];
+
+    if (descriptorResource && descriptorResource.descriptorOpen !== false) {
+      if (!attemptJsonCleanup(filePath, descriptorResource, cleanupFailures)) {
+        cleanupResources.push(descriptorResource);
+      }
+    }
+    if (published) {
+      const rollback = rollbackPublishedWrite(
+        filePath,
+        previousContents,
+        replacementIdentity,
+        mode,
+        claim,
+      );
+      attachCommitOutcome(error, previousContents, rollback);
+      cleanupFailures.push(...rollback.cleanupFailures);
+      cleanupResources.push(...rollback.cleanupResources);
+    }
+    if (replacementIdentity) {
+      const resource = {
+        kind: 'path',
+        artifactPath: tempPath,
+        identity: replacementIdentity,
+      };
+      if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
+        cleanupResources.push(resource);
+      }
+    }
+
+    for (const resource of cleanupResources) retainJsonCleanup(filePath, resource);
+    attachJsonCleanupFailures(error, filePath, cleanupFailures);
+    throw error;
+  }
+}
+
+function withClaimedJsonWrite(filePath, opts, operation) {
   const { mode = 0o600 } = opts;
   const directory = path.dirname(filePath);
   drainPendingJsonCleanup(filePath);
   ensurePrivateDirectory(directory);
   const claim = acquireJsonWriteClaim(filePath, mode);
+  const transaction = {
+    filePath,
+    directory,
+    mode,
+    claim,
+    previousContents: null,
+    committed: false,
+  };
   let operationError = null;
-  let committed = false;
+  let result;
 
   try {
     assertNoDurableJsonArtifacts(filePath, mode, claim);
-    assertOwnJsonClaim(claim);
-    const tempPath = jsonArtifactPath(filePath, 'tmp');
-    let previousContents = null;
-    try {
-      previousContents = readPrivateFile(filePath, { mode });
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
-
-    let fileDescriptor;
-    let replacementIdentity;
-    let published = false;
-    try {
-      fileDescriptor = fs.openSync(tempPath, 'wx', mode);
-      const replacementStats = fs.fstatSync(fileDescriptor);
-      replacementIdentity = fileIdentity(replacementStats);
-      if (!replacementStats.isFile()) {
-        throw unsafePathError(tempPath, 'a regular file');
-      }
-      assertCurrentOwner(replacementStats, tempPath);
-      fs.writeFileSync(fileDescriptor, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-      fs.fsyncSync(fileDescriptor);
-      fs.closeSync(fileDescriptor);
-      fileDescriptor = undefined;
-
-      ensurePrivateFile(tempPath, mode, replacementIdentity);
-      assertOwnJsonClaim(claim);
-      fs.renameSync(tempPath, filePath);
-      published = true;
-      ensurePrivateFile(filePath, mode, replacementIdentity);
-      syncDirectory(directory);
-      assertOwnJsonClaim(claim);
-      committed = true;
-    } catch (error) {
-      const cleanupFailures = [];
-      const cleanupResources = [];
-
-      if (fileDescriptor !== undefined) {
-        const resource = {
-          kind: 'descriptor',
-          descriptor: fileDescriptor,
-          descriptorOpen: true,
-          identity: replacementIdentity,
-          artifactPath: tempPath,
-        };
-        if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
-          cleanupResources.push(resource);
-        }
-      }
-      if (published) {
-        const rollback = rollbackPublishedWrite(
-          filePath,
-          previousContents,
-          replacementIdentity,
-          mode,
-          claim,
-        );
-        attachCommitOutcome(error, previousContents, rollback);
-        cleanupFailures.push(...rollback.cleanupFailures);
-        cleanupResources.push(...rollback.cleanupResources);
-      }
-      if (replacementIdentity) {
-        const resource = {
-          kind: 'path',
-          artifactPath: tempPath,
-          identity: replacementIdentity,
-        };
-        if (!attemptJsonCleanup(filePath, resource, cleanupFailures)) {
-          cleanupResources.push(resource);
-        }
-      }
-
-      for (const resource of cleanupResources) retainJsonCleanup(filePath, resource);
-      attachJsonCleanupFailures(error, filePath, cleanupFailures);
-      throw error;
-    }
+    readClaimedJsonSnapshot(transaction);
+    result = operation(transaction);
   } catch (error) {
     operationError = error;
   }
@@ -987,6 +1038,77 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
     throw preserveJsonClaimForRecovery(filePath, claim, operationError);
   }
 
-  operationError = releaseJsonWriteClaim(filePath, claim, operationError, committed);
+  operationError = releaseJsonWriteClaim(
+    filePath,
+    claim,
+    operationError,
+    transaction.committed,
+  );
   if (operationError) throw operationError;
+  return result;
+}
+
+function synchronousCallbackResult(value, label) {
+  if (value && typeof value.then === 'function') {
+    throw new TypeError(`${label} must be synchronous`);
+  }
+  return value;
+}
+
+/**
+ * Atomically write sensitive JSON data with owner-only permissions.
+ *
+ * The durable claim is held from pre-read admission through publication,
+ * rollback, directory sync, and claim cleanup.
+ */
+export function writeJsonAtomic(filePath, value, opts = {}) {
+  withClaimedJsonWrite(filePath, opts, (transaction) => {
+    publishClaimedJson(transaction, value);
+  });
+}
+
+/**
+ * Perform a synchronous logical read-modify-write while holding the same
+ * durable destination claim used for atomic publication.
+ *
+ * Returning undefined from updater releases the claim without publishing.
+ */
+export function updateJsonAtomic(filePath, updater, opts = {}) {
+  if (typeof updater !== 'function') {
+    throw new TypeError('Atomic JSON updater must be a function');
+  }
+  const parse = opts.parse || JSON.parse;
+  const validate = opts.validate || ((value) => value);
+  const createDefault = opts.createDefault || (() => undefined);
+  for (const [label, callback] of [
+    ['Atomic JSON parser', parse],
+    ['Atomic JSON validator', validate],
+    ['Atomic JSON default factory', createDefault],
+  ]) {
+    if (typeof callback !== 'function') throw new TypeError(`${label} must be a function`);
+  }
+
+  return withClaimedJsonWrite(filePath, opts, (transaction) => {
+    const parsed = transaction.previousContents === null
+      ? synchronousCallbackResult(createDefault(), 'Atomic JSON default factory')
+      : synchronousCallbackResult(
+        parse(transaction.previousContents.toString('utf8')),
+        'Atomic JSON parser',
+      );
+    const validatedCurrent = synchronousCallbackResult(
+      validate(parsed),
+      'Atomic JSON validator',
+    );
+    const current = validatedCurrent === undefined ? parsed : validatedCurrent;
+    const next = synchronousCallbackResult(updater(current), 'Atomic JSON updater');
+    if (next === undefined) return undefined;
+
+    const validatedNext = synchronousCallbackResult(
+      validate(next),
+      'Atomic JSON validator',
+    );
+    const replacement = validatedNext === undefined ? next : validatedNext;
+    publishClaimedJson(transaction, replacement);
+    return replacement;
+  });
 }

@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D20-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-407%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-428%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -418,7 +418,7 @@ stealth-cli provides structured errors with contextual hints:
   Hint: Create with: stealth profile create work
 ```
 
-Exit codes: `0` success · `1` general error · `2` invalid arguments · `3` browser launch · `4` navigation/blocked · `5` extraction · `6` timeout · `7` proxy · `8` profile/session/persistence
+Exit codes: `0` success · `1` general error · `2` invalid arguments · `3` browser launch · `4` navigation/blocked · `5` extraction · `6` timeout · `7` proxy · `8` profile/session/persistence · `129` SIGHUP · `130` SIGINT · `143` SIGTERM
 
 ## Common Options
 
@@ -442,8 +442,8 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 ```
 Version:     0.6.1
 Commands:    17
-Tests:       407 passing (29 test files)
-Source:      11,898 lines (49 JavaScript files under `src/`)
+Tests:       428 passing (29 test files)
+Source:      12,196 lines (49 JavaScript files under `src/`)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)

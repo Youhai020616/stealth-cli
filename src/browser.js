@@ -152,9 +152,10 @@ export async function launchBrowser(opts = {}) {
     restoreSessionUrl = true,
   } = opts;
 
-  const profileWasExplicit = Boolean(profileName);
-  profileName = profileName ? assertStateName(profileName, "Profile") : undefined;
-  sessionName = sessionName ? assertStateName(sessionName, "Session") : undefined;
+  const profileWasExplicit = profileName !== undefined && profileName !== null;
+  const sessionWasExplicit = sessionName !== undefined && sessionName !== null;
+  profileName = profileWasExplicit ? assertStateName(profileName, "Profile") : undefined;
+  sessionName = sessionWasExplicit ? assertStateName(sessionName, "Session") : undefined;
 
   // A linked session carries its profile identity even when --profile is not
   // repeated. Re-read it after locking before trusting any mutable state.
