@@ -10,13 +10,14 @@ IMPORTANT: `camoufox-js` is a niche library with limited training data. Always r
 bin/stealth.js           — CLI entry (Commander)
 src/
   index.js               — SDK public API (re-exports all modules)
-  browser.js             — Core: launch/close/navigate via camoufox-js
+  browser.js             — Core: launch/close/navigate + state snapshots via camoufox-js
+  browser-lifecycle.js   — Headed browser lifetime, signals, and durable checkpoints
   daemon.js              — Background browser server (unix socket ~/.stealth/daemon.sock)
   client.js              — HTTP client for daemon communication
   daemon-entry.js        — Daemon process entrypoint
   config.js              — Global config (~/.stealth/config.json)
-  profiles.js            — Browser identity profiles (~/.stealth/profiles/)
-  session.js             — Session persistence (cookies + state)
+  profiles.js            — Browser identity profiles ($STEALTH_HOME/profiles; default ~/.stealth/profiles/)
+  session.js             — Session persistence (cookies + state under $STEALTH_HOME/sessions)
   cookies.js             — Netscape cookie file parser
   proxy-pool.js          — Proxy rotation pool
   humanize.js            — Human behavior simulation (scroll, mouse, type)
@@ -27,7 +28,11 @@ src/
   mcp-server.js          — MCP server (stdio JSON-RPC) for AI agents
   utils/
     browser-factory.js   — Shared browser bootstrap (getHostOS, createBrowser, TEXT_EXTRACT_SCRIPT)
+    close-browser-cli.js — CLI close wrapper that surfaces persistence and cleanup failures
+    json-file.js         — Descriptor-bound private reads + atomic owner-only JSON writes
     resolve-opts.js      — Merge global config + CLI opts (used by all core commands)
+    state-lock.js        — Single-writer profile/session locks held for browser lifetime
+    storage-paths.js     — STEALTH_HOME profile/session/lock paths + strict state-name validation
   extractors/
     index.js             — Extractor registry (by engine name or URL)
     base.js              — Generic fallback extractor
@@ -46,8 +51,17 @@ tests/
 ## Key Architecture Decisions
 
 - **Two modes**: Direct mode (new browser per command) vs Daemon mode (reuse background browser via unix socket HTTP server)
-- `browser.js` detects daemon automatically — if running, all commands route through HTTP client; otherwise launch a new browser
+- `browser.js` detects daemon automatically; headed, stateful, proxied, or `forceDirect` launches always bypass it
+- `open` and direct `interactive` own SIGINT/SIGTERM/SIGHUP handling so state is checkpointed before shutdown
+- Named profile/session browser state is lowercase-canonical and single-writer; browser lifetimes and standalone mutations use the same lease protocol
+- Browser-lifetime leases and raw last-known URLs are held in module-private `WeakMap`s in `browser.js`; never expose them on handles. Validate writes with branded `ownsStateLock(lease, kind, name)`, not a caller-provided `.owns()` method
+- State locks fail closed after crashes and are never auto-removed; users must verify ownership before removing the exact stale lock path reported by the CLI
+- State names reject path-like input and Windows device basenames on every platform. Legacy sanitized metadata is rewritten on the next successful save; profile basenames come from `stealth profile list`, while legacy session basenames must be inspected under `$STEALTH_HOME/sessions` because no session-list CLI command exists
+- A session-only launch restores its linked profile; invalid state names, malformed state, or a missing linked profile fail before browser launch
+- SDK `closeBrowser()` is best-effort by default; `{ strict: true }` throws after cleanup. Later calls retry unfinished resource/lease cleanup but never recapture persistence. Failed launch rollback retries twice, then keeps a private error-scoped recovery capability for `retryBrowserLaunchCleanup(error)`. CLI commands surface close-time persistence failures with a non-zero exit status
 - All browser launch goes through `camoufox-js` `launchOptions()` → `playwright-core` `firefox.launch()`. Never use `chromium.launch()` or `playwright` (non-core)
+- `STEALTH_HOME` overrides profile, session, and lock storage; config, proxy-pool, and daemon paths still use `~/.stealth`. Profile/session/config/proxy JSON uses owner-only POSIX storage; mode bits are not enforceable on Windows, so Windows users must protect sensitive paths with ACLs
+- Atomic JSON writers hold a durable unique `.claim` from pre-read admission through publish/rollback sync. They fail closed on strict destination-scoped `.claim`/`.tmp`/`.rollback` artifacts left by any process. Never auto-remove cross-process artifacts; verify ownership and remove only the exact owner-only path reported to the user. On POSIX, sensitive path ancestors must be current-user/root controlled and not non-sticky group/other-writable; reject user-controlled ancestor symlinks and validate canonical targets of system-owned aliases. This serializes cooperative stealth-cli writers on a coherent local filesystem; owner-only storage is not a sandbox against hostile code already running as the same OS user
 - Daemon socket: `~/.stealth/daemon.sock`, PID: `~/.stealth/daemon.pid`
 
 ## camoufox-js API (DO NOT GUESS)
@@ -74,9 +88,9 @@ const browser = await firefox.launch(options);
 ## Error Handling
 
 Custom error hierarchy in `src/errors.js`. Exit codes:
-- 0=success, 1=general, 2=args, 3=browser launch, 4=navigation, 5=extraction, 6=timeout, 7=proxy, 8=profile
-- All errors extend `StealthError` with `.code`, `.hint`, `.format()`
-- Use specific error classes: `BrowserLaunchError`, `NavigationError`, `ExtractionError`, `TimeoutError`, `ProxyError`, `ProfileError`, `BlockedError`
+- 0=success, 1=general, 2=args, 3=browser launch, 4=navigation, 5=extraction, 6=timeout, 7=proxy, 8=profile/session/persistence error
+- All errors extend `StealthError` with `.code`, `.hint`, `.format()`, and a redacted `.toJSON()`; raw `.cause`, navigation `.url`, and cleanup internals must remain non-enumerable
+- Use specific error classes: `BrowserLaunchError`, `BrowserCleanupError`, `NavigationError`, `ExtractionError`, `TimeoutError`, `ProxyError`, `ProfileError`, `PersistenceError`, `BlockedError`
 - `handleError(err)` prints message + hint and calls `process.exit(code)`
 
 ## Coding Conventions

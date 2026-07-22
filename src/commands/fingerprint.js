@@ -4,10 +4,11 @@
 
 import ora from 'ora';
 import chalk from 'chalk';
-import { launchBrowser, closeBrowser, navigate, evaluate, waitForReady } from '../browser.js';
+import { launchBrowser, navigate, evaluate, waitForReady } from '../browser.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 import { handleError } from '../errors.js';
+import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 
 export function registerFingerprint(program) {
   program
@@ -52,7 +53,8 @@ async function showFingerprint(opts) {
     if (handle.isDaemon) {
       spinner.stop();
       log.error('Fingerprint check requires direct mode');
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     await navigate(handle, 'about:blank');
@@ -138,9 +140,9 @@ async function showFingerprint(opts) {
     console.log();
   } catch (err) {
     spinner.stop();
-    handleError(err, { log });
+    process.exitCode = handleError(err, { log, exit: false });
   } finally {
-    if (handle) await closeBrowser(handle);
+    if (handle) await closeBrowserForCli(handle);
   }
 }
 
@@ -205,7 +207,8 @@ async function runDetectionTests(opts) {
     if (handle.isDaemon) {
       spinner.stop();
       log.error('Detection tests require direct mode');
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     spinner.stop();
@@ -241,9 +244,9 @@ async function runDetectionTests(opts) {
     }
   } catch (err) {
     spinner.stop();
-    handleError(err, { log });
+    process.exitCode = handleError(err, { log, exit: false });
   } finally {
-    if (handle) await closeBrowser(handle);
+    if (handle) await closeBrowserForCli(handle);
   }
 }
 
@@ -263,7 +266,8 @@ async function compareFingerprints(count, opts) {
       if (handle.isDaemon) {
         spinner.stop();
         log.error('Compare requires direct mode');
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
 
       const fp = await evaluate(handle, `(() => ({
@@ -279,7 +283,7 @@ async function compareFingerprints(count, opts) {
 
       fingerprints.push(fp);
     } finally {
-      if (handle) await closeBrowser(handle);
+      if (handle) await closeBrowserForCli(handle);
     }
   }
 

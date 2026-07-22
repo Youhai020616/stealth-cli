@@ -6,6 +6,8 @@
 export {
   launchBrowser,
   closeBrowser,
+  retryBrowserLaunchCleanup,
+  checkpointBrowserState,
   navigate,
   getSnapshot,
   getA11ySnapshot,
@@ -19,6 +21,23 @@ export {
   typeRef,
   hoverRef,
 } from "./browser.js";
+
+// Browser state cleanup recovery
+export { retryStateLockCleanup } from "./utils/state-lock.js";
+
+// Errors
+export {
+  StealthError,
+  BrowserLaunchError,
+  BrowserCleanupError,
+  NavigationError,
+  ExtractionError,
+  TimeoutError,
+  ProxyError,
+  ProfileError,
+  PersistenceError,
+  BlockedError,
+} from "./errors.js";
 
 // Search
 export { expandMacro, getSupportedEngines } from "./macros.js";

@@ -6,8 +6,26 @@ import {
   createProfile, loadProfile, deleteProfile,
   listProfiles, getPresets,
 } from '../profiles.js';
+import { ProfileError, handleError } from '../errors.js';
 import { log } from '../output.js';
+import { maskProxyUrl } from '../utils/proxy.js';
 import chalk from 'chalk';
+
+function reportProfileError(error) {
+  const profileError = error instanceof ProfileError
+    ? error
+    : new ProfileError(error?.message || String(error), { cause: error });
+  process.exitCode = handleError(profileError, { log, exit: false });
+}
+
+function profileForDisplay(profile) {
+  const { cookies, ...safeProfile } = profile;
+  return {
+    ...safeProfile,
+    proxy: profile.proxy ? maskProxyUrl(profile.proxy) : null,
+    cookieCount: Array.isArray(cookies) ? cookies.length : 0,
+  };
+}
 
 export function registerProfile(program) {
   const profile = program
@@ -33,10 +51,9 @@ export function registerProfile(program) {
         log.dim(`  Timezone: ${p.fingerprint.timezone}`);
         log.dim(`  OS:       ${p.fingerprint.os}`);
         log.dim(`  Viewport: ${p.fingerprint.viewport.width}x${p.fingerprint.viewport.height}`);
-        if (p.proxy) log.dim(`  Proxy:    ${p.proxy}`);
+        if (p.proxy) log.dim(`  Proxy:    ${maskProxyUrl(p.proxy)}`);
       } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+        reportProfileError(err);
       }
     });
 
@@ -45,27 +62,31 @@ export function registerProfile(program) {
     .command('list')
     .description('List all profiles')
     .action(() => {
-      const profiles = listProfiles();
-      if (profiles.length === 0) {
-        log.info('No profiles yet. Create one with: stealth profile create <name>');
-        return;
-      }
-
-      console.log(chalk.bold('\n  Profiles:\n'));
-      const header = `  ${'Name'.padEnd(18)} ${'Locale'.padEnd(8)} ${'OS'.padEnd(8)} ${'Viewport'.padEnd(12)} ${'Proxy'.padEnd(6)} ${'Cookies'.padEnd(8)} ${'Uses'.padEnd(6)}`;
-      console.log(chalk.dim(header));
-      console.log(chalk.dim('  ' + '─'.repeat(70)));
-
-      for (const p of profiles) {
-        if (p.error) {
-          console.log(`  ${chalk.red(p.name.padEnd(18))} ${chalk.dim('corrupted')}`);
-          continue;
+      try {
+        const profiles = listProfiles();
+        if (profiles.length === 0) {
+          log.info('No profiles yet. Create one with: stealth profile create <name>');
+          return;
         }
-        console.log(
-          `  ${chalk.cyan(p.name.padEnd(18))} ${p.locale.padEnd(8)} ${p.os.padEnd(8)} ${p.viewport.padEnd(12)} ${p.proxy.padEnd(6)} ${String(p.cookies).padEnd(8)} ${String(p.useCount).padEnd(6)}`,
-        );
+
+        console.log(chalk.bold('\n  Profiles:\n'));
+        const header = `  ${'Name'.padEnd(18)} ${'Locale'.padEnd(8)} ${'OS'.padEnd(8)} ${'Viewport'.padEnd(12)} ${'Proxy'.padEnd(6)} ${'Cookies'.padEnd(8)} ${'Uses'.padEnd(6)}`;
+        console.log(chalk.dim(header));
+        console.log(chalk.dim('  ' + '─'.repeat(70)));
+
+        for (const p of profiles) {
+          if (p.error) {
+            console.log(`  ${chalk.red(p.name.padEnd(18))} ${chalk.dim(p.error)}`);
+            continue;
+          }
+          console.log(
+            `  ${chalk.cyan(p.name.padEnd(18))} ${p.locale.padEnd(8)} ${p.os.padEnd(8)} ${p.viewport.padEnd(12)} ${p.proxy.padEnd(6)} ${String(p.cookies).padEnd(8)} ${String(p.useCount).padEnd(6)}`,
+          );
+        }
+        console.log();
+      } catch (err) {
+        reportProfileError(err);
       }
-      console.log();
     });
 
   // stealth profile show <name>
@@ -76,10 +97,9 @@ export function registerProfile(program) {
     .action((name) => {
       try {
         const p = loadProfile(name);
-        console.log(JSON.stringify(p, null, 2));
+        console.log(JSON.stringify(profileForDisplay(p), null, 2));
       } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+        reportProfileError(err);
       }
     });
 
@@ -93,8 +113,7 @@ export function registerProfile(program) {
         deleteProfile(name);
         log.success(`Profile "${name}" deleted`);
       } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+        reportProfileError(err);
       }
     });
 

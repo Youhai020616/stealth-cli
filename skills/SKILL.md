@@ -11,6 +11,7 @@ Anti-detection browser CLI powered by Camoufox. Browse the web, search, extract 
 - User needs to monitor a page for changes
 - User needs to extract structured data (links, images, meta tags)
 - User needs to crawl a site with anti-detection
+- User needs a human to complete login, CAPTCHA, 2FA, or OAuth in a persistent profile
 
 ## Prerequisites
 
@@ -33,9 +34,24 @@ stealth browse https://example.com -f json
 # With proxy
 stealth browse https://example.com --proxy http://user:pass@host:port
 
-# With saved profile identity
-stealth browse https://example.com --profile us-desktop
+# Create a named profile from a preset once, then reuse it
+stealth profile create work --preset us-desktop
+stealth browse https://example.com --profile work
 ```
+
+### Human-assisted authentication
+
+```bash
+# The browser is headed, ignores stdin, and stays alive until all windows close.
+# Cookies are checkpointed to the profile every second.
+stealth profile create work --preset us-laptop
+stealth open https://example.com/login --profile work
+
+# Persist a named session as well as the profile
+stealth open --url https://example.com/login --profile work --session login-flow
+```
+
+Use `open`, not `browse --no-headless`, for CAPTCHA, 2FA, OAuth consent, or any flow where a human needs time to interact. `open` always bypasses the daemon. If profile and session are combined, profile cookies are canonical and a session linked to another profile is rejected. If the browser process terminates before the final live save, the latest durable checkpoint is retained. `--checkpoint-interval` accepts integer values from `250` through `60000` ms (default: `1000`).
 
 ### Screenshot
 
@@ -155,8 +171,11 @@ stealth profile create random1 --random
 # List profiles
 stealth profile list
 
-# Use profile (auto-saves cookies on exit)
+# One-shot command (auto-saves cookies before it closes)
 stealth browse https://example.com --profile work
+
+# Human login flow (periodic checkpoints + final save on window close)
+stealth open https://example.com/login --profile work
 
 # Available presets: us-desktop, us-laptop, uk-desktop, de-desktop,
 #   jp-desktop, cn-desktop, mobile-ios, mobile-android
@@ -165,12 +184,19 @@ stealth browse https://example.com --profile work
 ### Session persistence
 
 ```bash
-# Save/restore browsing session (cookies + last URL)
-stealth browse https://example.com --session my-task
+# Link a named session to the existing work profile
+stealth browse https://example.com --session my-task --profile work
 
-# Next time: auto-restores cookies and navigates to last URL
-stealth browse https://other.com --session my-task
+# Session-only open restores the linked profile and saved URL
+stealth open --session my-task
+
+# An explicit initial URL skips the saved URL
+stealth open https://other.com --session my-task
 ```
+
+A session linked to a profile automatically restores that profile when only `--session` is supplied. For `open` and `interactive`, an explicit initial URL skips the session's saved URL before navigation. Profile and session names accept only letters, numbers, underscores, and hyphens, use lowercase canonical identities, and reject Windows device basenames such as `CON`, `NUL`, `COM1`, and `LPT1` on every platform. Older versions sanitized unsupported filename characters to underscores; reuse that basename (for example, `work.prod` became `work_prod`). `stealth profile list` shows profile basenames. There is no session-list command, so inspect `$STEALTH_HOME/sessions` (default `~/.stealth/sessions`) for a legacy session filename. Compatible legacy metadata is rewritten on the next successful save, but files are not automatically renamed. If a linked profile is missing or stored state is malformed, startup fails before browser launch instead of silently using another identity.
+
+Named profile and session browser state is single-writer: browser lifetimes and standalone mutations use the same lease protocol. Concurrent reuse fails. Crash-left locks are not auto-removed; verify that no process owns the state before removing the exact lock path printed by the CLI. `STEALTH_HOME` relocates profiles, sessions, and their locks from the default `~/.stealth`; its state paths must not be symlinks. POSIX systems enforce owner-only directory/file modes (`0700`/`0600`), including config and proxy-pool credential storage; Windows skips POSIX mode-bit enforcement, so use user-only ACLs and avoid shared directories. Config, proxy-pool, and daemon paths still use `~/.stealth` in the current source.
 
 ### Proxy pool
 
@@ -216,7 +242,7 @@ stealth interactive --url https://example.com
 
 ## Output format
 
-All commands support `--format` or `-f`:
+Commands that produce page or search data may support `--format` or `-f` (check `stealth <command> --help`):
 - `text` — human-readable (default)
 - `json` — structured JSON
 - `jsonl` — one JSON object per line
@@ -230,7 +256,9 @@ stealth search google "query" -f json | jq '.results[].url'
 stealth extract https://example.com --links -f json | jq '.[].url'
 ```
 
-## Common options (all commands)
+## Common browser-command options
+
+Option availability varies by command; run `stealth <command> --help` for the exact set.
 
 | Option | Description |
 |--------|-------------|
@@ -242,3 +270,4 @@ stealth extract https://example.com --links -f json | jq '.[].url'
 | `--humanize` | Enable human behavior simulation |
 | `--retries <n>` | Max retries on failure |
 | `--no-headless` | Show browser window |
+| `--checkpoint-interval <ms>` | `open` only; state checkpoint interval (`250`–`60000`, default `1000`) |

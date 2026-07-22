@@ -20,6 +20,12 @@ import {
   clickRef,
   typeRef,
 } from "../browser.js";
+import {
+  createBrowserLifecycle,
+  createLaunchSignalGuard,
+  createLifecyclePersistenceCleanupFailure,
+  createLifecycleSignalError,
+} from "../browser-lifecycle.js";
 import { expandMacro, getSupportedEngines } from "../macros.js";
 import {
   humanClick,
@@ -29,7 +35,23 @@ import {
 } from "../humanize.js";
 import { log } from "../output.js";
 import { resolveOpts } from "../utils/resolve-opts.js";
-import { handleError } from "../errors.js";
+import {
+  PersistenceError,
+  StealthError,
+  attachCleanupFailures,
+  formatCleanupFailures,
+  handleError,
+} from "../errors.js";
+import { closeBrowserForCli } from "../utils/close-browser-cli.js";
+
+function describeUrl(value) {
+  try {
+    const origin = new URL(value).origin;
+    return origin && origin !== 'null' ? origin : 'current page';
+  } catch {
+    return 'current page';
+  }
+}
 
 const HELP_TEXT = `
 ${chalk.bold("Navigation:")}
@@ -73,28 +95,102 @@ export function registerInteractive(program) {
     .option("--cookies <file>", "Load cookies from Netscape-format file")
     .option("--no-headless", "Show browser window")
     .option("--url <url>", "Initial URL to open")
+    .option("--profile <name>", "Use a browser profile")
+    .option("--session <name>", "Use/restore a named session")
     .action(async (opts) => {
       opts = resolveOpts(opts);
       const spinner = ora("Launching stealth browser...").start();
       let handle;
+      let lifecycle;
+      let rl;
+      let cleanupIncomplete = false;
+      let lastCheckpointWarning = null;
+      const signalGuard = createLaunchSignalGuard();
+      const applyLifecycleResult = (result) => {
+        if (result.usedCheckpointFallback && result.persistedAt) {
+          const reason = result.finalPersistenceError
+            ? 'Final browser snapshot could not be saved'
+            : 'Browser closed before a final live snapshot';
+          log.warn(`${reason}; using checkpoint from ${result.persistedAt}`);
+        }
+        if (result.persistenceIncomplete) {
+          const persistenceFailure = createLifecyclePersistenceCleanupFailure(result);
+          if (persistenceFailure) log.warn(persistenceFailure.error.format());
+        }
+        if (result.cleanupErrors?.length > 0) {
+          cleanupIncomplete = true;
+          log.warn(formatCleanupFailures(
+            result.cleanupErrors,
+            "Browser cleanup was incomplete",
+          ));
+        }
+        if (result.exitCode) process.exitCode = result.exitCode;
+      };
 
       try {
         handle = await launchBrowser({
           headless: opts.headless,
           proxy: opts.proxy,
+          profile: opts.profile,
+          session: opts.session,
+          forceDirect: opts.headless === false || Boolean(opts.cookies),
+          handleSignals: false,
+          restoreSessionUrl: !opts.url,
         });
 
-        if (opts.cookies && !handle.isDaemon) {
-          const { loadCookies } = await import("../cookies.js");
-          const result = await loadCookies(handle.context, opts.cookies);
-          log.info(result.message);
+        if (!handle.isDaemon) {
+          lifecycle = createBrowserLifecycle(handle, {
+            onCheckpointError(error) {
+              if (error.message !== lastCheckpointWarning) {
+                lastCheckpointWarning = error.message;
+                log.warn(`State checkpoint failed; it will be retried: ${error.message}`);
+              }
+            },
+          });
+          signalGuard.transferTo(lifecycle);
+        } else {
+          const pendingSignal = signalGuard.pendingSignal;
+          const signalExitCode = signalGuard.exitCode;
+          signalGuard.dispose();
+          if (pendingSignal) {
+            spinner.stop();
+            process.exitCode = handleError(
+              new StealthError(`Interrupted by ${pendingSignal}`, {
+                code: signalExitCode,
+              }),
+              { log, exit: false },
+            );
+            return;
+          }
         }
 
-        if (opts.url) {
-          await navigate(handle, opts.url);
-          if (!handle.isDaemon) {
-            await waitForReady(handle.page);
+        if (opts.cookies && !handle.isDaemon && lifecycle.phase === "running") {
+          try {
+            const { loadCookies } = await import("../cookies.js");
+            const result = await loadCookies(handle.context, opts.cookies);
+            if (lifecycle.phase === "running") log.info(result.message);
+          } catch (error) {
+            if (lifecycle.phase === "running") throw error;
           }
+        }
+
+        if (opts.url && (!lifecycle || lifecycle.phase === "running")) {
+          try {
+            await navigate(handle, opts.url);
+            if (!handle.isDaemon && lifecycle.phase === "running") {
+              await waitForReady(handle.page);
+            }
+          } catch (error) {
+            if (!lifecycle || lifecycle.phase === "running") throw error;
+          }
+        }
+
+        if (lifecycle && lifecycle.phase !== "running") {
+          spinner.stop();
+          const result = await lifecycle.wait();
+          applyLifecycleResult(result);
+          log.success("Bye! 🦊");
+          return;
         }
 
         spinner.stop();
@@ -104,10 +200,10 @@ export function registerInteractive(program) {
 
         if (opts.url) {
           const currentUrl = await getUrl(handle);
-          log.info(`Current page: ${currentUrl}`);
+          log.info(`Current page: ${describeUrl(currentUrl)}`);
         }
 
-        const rl = createInterface({
+        rl = createInterface({
           input: process.stdin,
           output: process.stderr,
           prompt: chalk.green("stealth> "),
@@ -382,18 +478,87 @@ export function registerInteractive(program) {
             log.error(`${err.message}`);
           }
 
-          rl.prompt();
+          if (!lifecycle || lifecycle.phase === "running") rl.prompt();
         });
 
-        rl.on("close", async () => {
+        const readlineClosed = new Promise((resolve) => rl.once("close", resolve));
+
+        if (lifecycle) {
+          void readlineClosed
+            .then(() => lifecycle.requestExit("readline-closed"))
+            .catch(() => {});
+
+          const result = await lifecycle.wait();
+          rl.close();
+          await readlineClosed;
+          applyLifecycleResult(result);
+        } else {
+          await readlineClosed;
           await closeBrowser(handle);
+        }
+
+        if (cleanupIncomplete) {
+          log.warn("Interactive browser exited with cleanup errors");
+        } else {
           log.success("Bye! 🦊");
-          process.exit(0);
-        });
-      } catch (err) {
+        }
+      } catch (caughtError) {
+        let err = caughtError;
         spinner.stop();
-        if (handle) await closeBrowser(handle);
-        handleError(err, { log });
+        signalGuard.dispose();
+        if (rl) rl.close();
+
+        const inheritedCleanupFailures = Array.isArray(err.cleanupFailures)
+          ? err.cleanupFailures
+          : [];
+        const cleanupFailures = [...inheritedCleanupFailures];
+        if (lifecycle) {
+          try {
+            const result = await lifecycle.requestExit("command-error");
+            if (result.reason !== "command-error") {
+              applyLifecycleResult(result);
+              return;
+            }
+            const persistenceFailure = createLifecyclePersistenceCleanupFailure(result);
+            if (persistenceFailure) {
+              cleanupFailures.push(persistenceFailure);
+            } else {
+              cleanupFailures.push(...(result.cleanupErrors || []));
+            }
+          } catch (lifecycleError) {
+            if (lifecycleError !== err) {
+              if (lifecycleError instanceof PersistenceError) {
+                cleanupFailures.push({ target: "persistence", error: lifecycleError });
+              } else {
+                cleanupFailures.push(...(
+                  lifecycleError.cleanupFailures?.length > 0
+                    ? lifecycleError.cleanupFailures
+                    : [{ target: "lifecycle", error: lifecycleError }]
+                ));
+              }
+            }
+          }
+        } else if (handle) {
+          const cleanup = await closeBrowserForCli(handle, { log });
+          cleanupFailures.push(...(cleanup.cleanupErrors || []));
+        }
+        attachCleanupFailures(
+          err,
+          cleanupFailures.slice(inheritedCleanupFailures.length),
+        );
+        const lifecycleSignalError = lifecycle
+          ? createLifecycleSignalError(err, cleanupFailures)
+          : null;
+        const handledError = lifecycleSignalError || (signalGuard.pendingSignal && !lifecycle
+          ? attachCleanupFailures(
+            new StealthError(`Interrupted by ${signalGuard.pendingSignal}`, {
+              code: signalGuard.exitCode,
+              cause: err,
+            }),
+            cleanupFailures,
+          )
+          : err);
+        process.exitCode = handleError(handledError, { log, exit: false });
       }
     });
 }

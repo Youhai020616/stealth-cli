@@ -7,7 +7,7 @@
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License" /></a>
     <a href="https://camoufox.com"><img src="https://img.shields.io/badge/engine-Camoufox-red" alt="Camoufox" /></a>
     <img src="https://img.shields.io/badge/node-%3E%3D20-green" alt="Node" />
-    <img src="https://img.shields.io/badge/tests-151%20passing-brightgreen" alt="Tests" />
+    <img src="https://img.shields.io/badge/tests-432%20passing-brightgreen" alt="Tests" />
   </p>
 </div>
 
@@ -23,7 +23,7 @@ Headless Chrome gets fingerprinted. Playwright gets blocked. Stealth plugins bec
 
 **stealth-cli** uses [Camoufox](https://camoufox.com) — a Firefox fork that patches fingerprint generation at the **C++ implementation level**. No JavaScript shims, no wrappers, no tells. The browser reports spoofed values natively.
 
-Wrap that in a developer-friendly CLI with 16 commands, and you get a tool that both humans and AI agents can use.
+Wrap that in a developer-friendly CLI with 17 commands, and you get a tool that both humans and AI agents can use.
 
 ### How it compares
 
@@ -62,6 +62,8 @@ stealth screenshot https://example.com -o page.png          # Screenshot
 stealth search google "best coffee beans" -f json           # Search Google
 stealth extract https://example.com --links                 # Extract links
 stealth crawl https://example.com -d 2 -l 50 -o out.jsonl  # Crawl
+stealth profile create work --preset us-laptop              # Create a saved identity once
+stealth open https://example.com --profile work              # Human login flow
 stealth interactive --url https://example.com               # REPL mode
 ```
 
@@ -89,7 +91,7 @@ No JavaScript shims. No detectable wrappers. The browser natively reports spoofe
 
 ## Commands
 
-### Core (11)
+### Core (12)
 
 | Command | Description |
 |---------|-------------|
@@ -98,7 +100,8 @@ No JavaScript shims. No detectable wrappers. The browser natively reports spoofe
 | `search <engine> <query>` | Search 14 engines with anti-detection |
 | `extract <url>` | Extract links, images, meta, headings, CSS selectors |
 | `crawl <url>` | Recursive crawling with depth/filter/delay control |
-| `interactive` | REPL with 20+ commands (goto, click, type, eval...) |
+| `open [url]` | Headed browser for human authentication; exits when all windows close |
+| `interactive` | Stdin-driven REPL with 20+ commands (goto, click, type, eval...) |
 | `pdf <url>` | Save page as PDF |
 | `batch <file>` | Batch process URLs from file |
 | `monitor <url>` | Watch for changes (price drops, stock alerts) |
@@ -126,7 +129,8 @@ stealth browse https://example.com                       # Text output
 stealth browse https://example.com -f json               # JSON with metadata
 stealth browse https://example.com -f snapshot            # Accessibility tree
 stealth browse https://example.com --humanize             # Human behavior simulation
-stealth browse https://example.com --profile us-desktop   # Saved identity
+stealth profile create work --preset us-desktop           # Create a saved identity once
+stealth browse https://example.com --profile work         # Reuse the saved identity
 stealth browse https://example.com --proxy http://proxy:8080
 ```
 
@@ -173,10 +177,24 @@ stealth monitor https://shop.com/item --contains "In Stock"
 stealth monitor https://example.com --not-contains "Sold Out"
 ```
 
+### Headed Browser for Human Authentication
+
+```bash
+# Create the identity once, then open a browser that lives until its windows close
+stealth profile create work --preset us-laptop
+stealth open https://example.com/login --profile work
+
+# Named sessions can be checkpointed at the same time
+stealth open --url https://example.com/login --profile work --session login-flow
+```
+
+`open` is always headed and always uses a direct browser, even when the daemon is running. It ignores stdin, checkpoints cookies every second, performs a final live save when the last page closes, and gracefully handles `SIGHUP`, `SIGINT`, and `SIGTERM` on POSIX systems. If the browser process exits before a final live capture, the latest durable checkpoint is retained and a warning is printed. `--checkpoint-interval` accepts integer values from `250` through `60000` ms (default: `1000`).
+
 ### Interactive REPL
 
 ```bash
 stealth interactive --url https://example.com
+stealth interactive --no-headless --profile work --session debugging
 
 stealth> goto https://google.com
 stealth> click "button.submit"
@@ -214,6 +232,9 @@ stealth profile create rand1 --random
 
 stealth browse https://example.com --profile work
 # → Fingerprint: Windows, en-US, America/New_York
+
+# Human-assisted login; cookies are checkpointed while the browser is open
+stealth open https://example.com/login --profile work
 ```
 
 **8 presets:** `us-desktop` · `us-laptop` · `uk-desktop` · `de-desktop` · `jp-desktop` · `cn-desktop` · `mobile-ios` · `mobile-android`
@@ -221,12 +242,24 @@ stealth browse https://example.com --profile work
 ### Session Persistence
 
 ```bash
+# Link a named session to the existing work profile
 stealth browse https://example.com --session my-task --profile work
 # → Cookies + URL + history saved
 
-stealth browse https://other.com --session my-task
-# → Auto-restores cookies and last URL
+# Session-only open restores the linked work profile and the saved URL
+stealth open --session my-task
+
+# An explicit initial URL skips the session's saved URL
+stealth open https://other.com --session my-task
 ```
+
+When `--profile` and `--session` are combined, the profile is the canonical cookie source and the session restores URL/history metadata. A session already linked to a different profile is rejected instead of merging two identities. When only `--session` is supplied, a linked profile is restored automatically. For `open` and `interactive`, an explicit initial URL takes precedence: stealth-cli skips the saved session URL before navigating to the requested URL.
+
+> **Behavior/security change:** Profile and session names may contain only ASCII letters, numbers, underscores, and hyphens (`[A-Za-z0-9_-]+`) and use lowercase canonical identities. Windows device basenames such as `CON`, `NUL`, `COM1`, and `LPT1` are rejected on every platform. Existing mixed-case filenames are resolved case-insensitively. Older releases replaced unsupported characters with underscores in the filename while retaining the original name in JSON; for state previously requested as `work.prod`, reuse the sanitized basename `work_prod`. `stealth profile list` shows reusable profile basenames. There is no session-list CLI command, so inspect the filenames in `$STEALTH_HOME/sessions` (default `~/.stealth/sessions`) when migrating an older session. Compatible legacy metadata is canonicalized and rewritten on the next successful state save; files are not renamed automatically. If a session links to a profile that no longer exists, startup fails before the browser launches instead of silently falling back to a different identity.
+
+Named profile and session browser state is single-writer. Browser lifetimes and standalone create/save/delete operations all participate in the same lock protocol, so concurrent mutation fails instead of mixing identities. Lock files are never removed automatically after a crash: when the recorded owner is no longer running, stealth-cli prints the exact lock path and requires explicit removal after you confirm no process still owns that state. Profile and session JSON files contain authentication material; writes are atomic. On POSIX platforms, directories and files are enforced to owner-only modes (`0700` and `0600`). Windows does not provide equivalent POSIX mode-bit enforcement, so protect `STEALTH_HOME` with user-only Windows ACLs and do not place it in a shared directory.
+
+By default, profiles, sessions, and their locks live under `~/.stealth`. Set `STEALTH_HOME` to relocate those paths together. The configured state root and child paths must not be symlinks. Configuration (`config.json`), proxy-pool (`proxies.json`), and daemon socket/PID paths remain under `~/.stealth` in the current source; config and proxy-pool files are stored with the same owner-only POSIX directory/file modes (`0700`/`0600`). Windows users must protect these paths with user-only ACLs. A hard browser crash can only preserve state captured by the most recent checkpoint; `open` defaults to a one-second interval.
 
 ### Proxy Pool
 
@@ -322,16 +355,51 @@ Add stealth browsing capabilities to your AI coding assistant:
 
 ### SDK (Library Mode)
 
-Use stealth-cli programmatically in your Node.js applications:
+Use stealth-cli programmatically in your Node.js applications. The `work` profile must be created first, either with `stealth profile create work --preset us-desktop` or the SDK's `createProfile('work', { preset: 'us-desktop' })` API.
 
 ```javascript
-import { launchBrowser, closeBrowser, navigate, getTextContent } from 'stealth-cli';
+import {
+  launchBrowser,
+  closeBrowser,
+  checkpointBrowserState,
+  navigate,
+  getTextContent,
+} from 'stealth-cli';
 
-const handle = await launchBrowser({ profile: 'us-desktop', humanize: true });
-await navigate(handle, 'https://example.com');
-const text = await getTextContent(handle);
-await closeBrowser(handle);
+const handle = await launchBrowser({ profile: 'work', humanize: true });
+let operationError = null;
+try {
+  await navigate(handle, 'https://example.com');
+  const text = await getTextContent(handle);
+  console.log(text);
+  await checkpointBrowserState(handle); // Optional durable checkpoint while still open
+} catch (error) {
+  operationError = error;
+}
+
+let closeError = null;
+try {
+  await closeBrowser(handle, { strict: true });
+} catch (error) {
+  closeError = error;
+}
+
+if (operationError && closeError) {
+  throw new AggregateError([operationError, closeError], 'Browser operation and cleanup both failed');
+}
+if (operationError) throw operationError;
+if (closeError) throw closeError;
 ```
+
+`closeBrowser(handle)` is best-effort by default: it attempts persistence and cleanup, then returns `{ persistence, persistenceError, cleanupErrors }` instead of throwing for those failures. Inspect both error fields if you use the default mode. With `{ strict: true }`, cleanup is still attempted, then an exported `PersistenceError` or `BrowserCleanupError` is thrown when work remains incomplete. Persistence is captured at most once; calling `closeBrowser(handle)` again retries only unfinished context, browser, or state-lock cleanup and never recaptures persistence. Fix the reported storage issue before repeating an authentication flow whose final persistence failed, and retry the same handle only for unfinished cleanup before reusing its named profile/session.
+
+A failed `launchBrowser()` performs two bounded rollback attempts. If its error still reports incomplete browser cleanup, retain that original error and call `retryBrowserLaunchCleanup(error, { strict: true })`; the SDK keeps the rollback handle and state lease private and removes the retry capability only after cleanup completes. If profile/session lock acquisition or a standalone state operation reports incomplete state-lock cleanup, retain that exact error object and call `retryStateLockCleanup(error)`; cloned or serialized errors intentionally do not carry the private recovery capability.
+
+Use `checkpointBrowserState(handle)` for manual mid-run persistence on a handle launched with a named profile or session; it reuses the private browser-owned lease. The lower-level `captureSession(name, context, page)` API remains suitable for independently managed contexts, but it cannot acquire a session name already owned by a live `launchBrowser()` handle.
+
+A successful close result or `checkpointBrowserState(handle)` result can contain cookie values and the raw last URL, and error objects retain non-enumerable diagnostic fields such as `.cause` or `.url`. Do not log, serialize, or return browser handles, checkpoint results, or raw close results across trust boundaries. Store `STEALTH_HOME` as sensitive authentication state. Error `toJSON()` output is redacted for routine logging, but the in-memory objects must still be treated as sensitive.
+
+Atomic state writes hold a unique destination-scoped `.claim` from admission through publish or rollback sync. They fail closed when a prior process leaves a strict `.claim`, `.tmp`, or `.rollback` artifact. stealth-cli never auto-removes cross-process artifacts: verify that no live process owns the artifact, inspect it, and remove only the exact owner-only path reported by the command before retrying. On POSIX, sensitive path ancestors must be controlled by the current user or root and must not be non-sticky group/other-writable; user-controlled ancestor symlinks are rejected, while system-owned aliases are accepted only after their canonical target chain passes the same checks. This protocol serializes cooperative stealth-cli writers on a coherent local filesystem; owner-only files do not sandbox authentication state from hostile code already running as the same OS user.
 
 ---
 
@@ -350,11 +418,11 @@ stealth-cli provides structured errors with contextual hints:
   Hint: Create with: stealth profile create work
 ```
 
-Exit codes: `0` success · `3` browser launch · `4` navigation/blocked · `5` extraction · `7` proxy · `8` profile
+Exit codes: `0` success · `1` general error · `2` invalid arguments · `3` browser launch · `4` navigation/blocked · `5` extraction · `6` timeout · `7` proxy · `8` profile/session/persistence · `129` SIGHUP · `130` SIGINT · `143` SIGTERM
 
 ## Common Options
 
-Available on all core commands:
+Option availability varies by command; run `stealth <command> --help` for the exact set.
 
 | Option | Description |
 |--------|-------------|
@@ -365,16 +433,17 @@ Available on all core commands:
 | `--cookies <file>` | Import Netscape-format cookie file |
 | `--humanize` | Simulate human behavior |
 | `--retries <n>` | Max retries on failure |
-| `--no-headless` | Show browser window |
+| `--no-headless` | Show browser window on commands that default to headless |
+| `--checkpoint-interval <ms>` | `open` authentication-state checkpoint interval (`250`–`60000`; default: `1000`) |
 | `-f, --format` | Output format: text, json, jsonl, snapshot, markdown |
 
 ## Project Stats
 
-```
+```text
 Version:     0.6.1
-Commands:    16
-Tests:       151 passing (18 test files)
-Source:      5,900 lines (39 source files)
+Commands:    17
+Tests:       432 passing (29 test files)
+Source:      12,226 lines (49 JavaScript files under `src/`)
 Extractors:  6 (Google, Bing, DuckDuckGo, YouTube, GitHub, generic)
 Presets:     8 browser profiles
 Engine:      Camoufox (C++ Firefox fork)

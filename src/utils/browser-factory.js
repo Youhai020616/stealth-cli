@@ -24,6 +24,7 @@ export function getHostOS() {
  * @param {boolean} [opts.headless=true]
  * @param {string} [opts.os] - Override OS (default: auto-detect)
  * @param {object} [opts.proxy] - { server, username?, password? }
+ * @param {boolean} [opts.handleSignals=true] - Let Playwright own process signal handling
  * @returns {Promise<import('playwright-core').Browser>}
  */
 export async function createBrowser(opts = {}) {
@@ -31,6 +32,7 @@ export async function createBrowser(opts = {}) {
     headless = true,
     os: targetOS,
     proxy,
+    handleSignals = true,
   } = opts;
 
   const options = await launchOptions({
@@ -43,6 +45,9 @@ export async function createBrowser(opts = {}) {
     enable_cache: true,
     proxy: proxy || undefined,
     geoip: !!proxy,
+    handleSIGINT: handleSignals,
+    handleSIGTERM: handleSignals,
+    handleSIGHUP: handleSignals,
   });
 
   return firefox.launch(options);

@@ -4,12 +4,13 @@
 
 import ora from 'ora';
 import {
-  launchBrowser, closeBrowser, navigate, getTitle,
+  launchBrowser, navigate, getTitle,
   getUrl, evaluate, waitForReady,
 } from '../browser.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 import { handleError, ExtractionError } from '../errors.js';
+import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 
 export function registerExtract(program) {
   program
@@ -45,6 +46,7 @@ export function registerExtract(program) {
           proxyRotate: opts.proxyRotate,
           profile: opts.profile,
           session: opts.session,
+          restoreSessionUrl: false,
         });
 
         if (opts.cookies && !handle.isDaemon) {
@@ -158,9 +160,9 @@ export function registerExtract(program) {
         log.success(`Extracted from: ${currentUrl}`);
       } catch (err) {
         spinner.stop();
-        handleError(err, { log });
+        process.exitCode = handleError(err, { log, exit: false });
       } finally {
-        if (handle) await closeBrowser(handle);
+        if (handle) await closeBrowserForCli(handle);
       }
     });
 }

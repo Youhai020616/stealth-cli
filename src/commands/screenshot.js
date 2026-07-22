@@ -3,10 +3,11 @@
  */
 
 import ora from 'ora';
-import { launchBrowser, closeBrowser, navigate, takeScreenshot, getUrl, waitForReady } from '../browser.js';
+import { launchBrowser, navigate, takeScreenshot, getUrl, waitForReady } from '../browser.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 import { handleError } from '../errors.js';
+import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 
 export function registerScreenshot(program) {
   program
@@ -39,6 +40,7 @@ export function registerScreenshot(program) {
           proxyRotate: opts.proxyRotate,
           profile: opts.profile,
           session: opts.session,
+          restoreSessionUrl: false,
           viewport: {
             width: opts.width,
             height: opts.height,
@@ -90,9 +92,9 @@ export function registerScreenshot(program) {
         log.dim(`  Size: ${opts.width}x${opts.height}${opts.full ? ' (full page)' : ''}`);
       } catch (err) {
         spinner.stop();
-        handleError(err, { log });
+        process.exitCode = handleError(err, { log, exit: false });
       } finally {
-        if (handle) await closeBrowser(handle);
+        if (handle) await closeBrowserForCli(handle);
       }
     });
 }

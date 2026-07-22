@@ -16,6 +16,7 @@ import { registerSearch } from '../src/commands/search.js';
 import { registerExtract } from '../src/commands/extract.js';
 import { registerCrawl } from '../src/commands/crawl.js';
 import { registerInteractive } from '../src/commands/interactive.js';
+import { registerOpen } from '../src/commands/open.js';
 import { registerDaemon } from '../src/commands/daemon.js';
 import { registerProfile } from '../src/commands/profile.js';
 import { registerProxy } from '../src/commands/proxy.js';
@@ -26,6 +27,8 @@ import { registerFingerprint } from '../src/commands/fingerprint.js';
 import { registerServe } from '../src/commands/serve.js';
 import { registerMcp } from '../src/commands/mcp.js';
 import { registerConfig } from '../src/commands/config.js';
+import { handleError } from '../src/errors.js';
+import { log } from '../src/output.js';
 
 program
   .name('stealth')
@@ -39,6 +42,7 @@ registerSearch(program);
 registerExtract(program);
 registerCrawl(program);
 registerInteractive(program);
+registerOpen(program);
 registerPdf(program);
 registerBatch(program);
 registerMonitor(program);
@@ -52,4 +56,8 @@ registerProfile(program);
 registerProxy(program);
 registerConfig(program);
 
-program.parse();
+try {
+  await program.parseAsync();
+} catch (error) {
+  process.exitCode = handleError(error, { log, exit: false });
+}

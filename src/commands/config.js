@@ -7,7 +7,40 @@ import {
   getConfigValue, setConfigValue, deleteConfigValue,
   listConfig, resetConfig, CONFIG_FILE,
 } from '../config.js';
+import { PersistenceError, StealthError, handleError } from '../errors.js';
 import { log } from '../output.js';
+import { maskProxyUrl } from '../utils/proxy.js';
+
+function configValueForDisplay(key, value) {
+  if (key === 'proxy' && value !== null) return maskProxyUrl(value);
+  return value;
+}
+
+function storageDiagnostic(error) {
+  const code = typeof error?.code === 'string' && /^[A-Z0-9_]+$/u.test(error.code)
+    ? error.code
+    : null;
+  if (!code) return '';
+  const syscall = typeof error?.syscall === 'string' && /^[a-z0-9_-]+$/iu.test(error.syscall)
+    ? error.syscall
+    : null;
+  return ` (${code}${syscall ? ` during ${syscall}` : ''})`;
+}
+
+function reportConfigError(error, operation) {
+  const diagnostic = storageDiagnostic(error);
+  const message = `Failed to ${operation} global configuration${diagnostic}`;
+  const opts = {
+    hint: `Check ownership, permissions, and contents for: ${CONFIG_FILE}`,
+    cause: error,
+  };
+  const configError = error instanceof StealthError
+    ? error
+    : diagnostic
+      ? new PersistenceError(message, opts)
+      : new StealthError(message, opts);
+  process.exitCode = handleError(configError, { log, exit: false });
+}
 
 export function registerConfig(program) {
   const config = program
@@ -19,18 +52,23 @@ export function registerConfig(program) {
     .command('list')
     .description('Show all config values')
     .action(() => {
-      const items = listConfig();
-      console.log(chalk.bold('\n  Configuration:\n'));
-      console.log(chalk.dim(`  ${'Key'.padEnd(20)} ${'Value'.padEnd(25)} Source`));
-      console.log(chalk.dim('  ' + '─'.repeat(55)));
+      try {
+        const items = listConfig();
+        console.log(chalk.bold('\n  Configuration:\n'));
+        console.log(chalk.dim(`  ${'Key'.padEnd(20)} ${'Value'.padEnd(25)} Source`));
+        console.log(chalk.dim('  ' + '─'.repeat(55)));
 
-      for (const item of items) {
-        const val = item.value === null ? chalk.dim('null') : String(item.value);
-        const src = item.source === 'user' ? chalk.cyan('user') : chalk.dim('default');
-        console.log(`  ${item.key.padEnd(20)} ${val.padEnd(25)} ${src}`);
+        for (const item of items) {
+          const displayValue = configValueForDisplay(item.key, item.value);
+          const val = displayValue === null ? chalk.dim('null') : String(displayValue);
+          const src = item.source === 'user' ? chalk.cyan('user') : chalk.dim('default');
+          console.log(`  ${item.key.padEnd(20)} ${val.padEnd(25)} ${src}`);
+        }
+
+        console.log(chalk.dim(`\n  File: ${CONFIG_FILE}\n`));
+      } catch (error) {
+        reportConfigError(error, 'read');
       }
-
-      console.log(chalk.dim(`\n  File: ${CONFIG_FILE}\n`));
     });
 
   // stealth config get <key>
@@ -41,10 +79,9 @@ export function registerConfig(program) {
     .action((key) => {
       try {
         const value = getConfigValue(key);
-        console.log(value);
-      } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+        console.log(configValueForDisplay(key, value));
+      } catch (error) {
+        reportConfigError(error, 'read');
       }
     });
 
@@ -57,10 +94,9 @@ export function registerConfig(program) {
     .action((key, value) => {
       try {
         const result = setConfigValue(key, value);
-        log.success(`${key} = ${result}`);
-      } catch (err) {
-        log.error(err.message);
-        process.exit(1);
+        log.success(`${key} = ${configValueForDisplay(key, result)}`);
+      } catch (error) {
+        reportConfigError(error, 'update');
       }
     });
 
@@ -70,8 +106,12 @@ export function registerConfig(program) {
     .description('Reset a config value to default')
     .argument('<key>', 'Config key')
     .action((key) => {
-      deleteConfigValue(key);
-      log.success(`${key} reset to default`);
+      try {
+        deleteConfigValue(key);
+        log.success(`${key} reset to default`);
+      } catch (error) {
+        reportConfigError(error, 'update');
+      }
     });
 
   // stealth config reset
@@ -79,7 +119,11 @@ export function registerConfig(program) {
     .command('reset')
     .description('Reset all config to defaults')
     .action(() => {
-      resetConfig();
-      log.success('All config reset to defaults');
+      try {
+        resetConfig();
+        log.success('All config reset to defaults');
+      } catch (error) {
+        reportConfigError(error, 'reset');
+      }
     });
 }

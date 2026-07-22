@@ -11,7 +11,7 @@ process.env.USERPROFILE = TEST_HOME;
 vi.resetModules();
 
 const { resolveOpts } = await import('../../src/utils/resolve-opts.js');
-const { setConfigValue, resetConfig } = await import('../../src/config.js');
+const { setConfigValue, resetConfig, CONFIG_FILE } = await import('../../src/config.js');
 
 beforeEach(() => {
   resetConfig();
@@ -75,6 +75,12 @@ describe('resolveOpts', () => {
     expect(opts.headless).toBe(true); // Both agree, no conflict
   });
 
+  it('should fail before resolving options from malformed persisted config', () => {
+    fs.writeFileSync(CONFIG_FILE, '{"proxy":"http://proxy.example:8080"', { mode: 0o600 });
+
+    expect(() => resolveOpts({})).toThrow('contains malformed JSON');
+  });
+
   it('should handle proxy from config', () => {
     setConfigValue('proxy', 'http://proxy:8080');
     const opts = resolveOpts({});
@@ -95,6 +101,7 @@ describe('resolveOpts', () => {
       limit: '50',
       width: '1920',
       height: '1080',
+      checkpointInterval: '1000',
     });
     expect(opts.timeout).toBe(5000);
     expect(opts.delay).toBe(2000);
@@ -103,6 +110,7 @@ describe('resolveOpts', () => {
     expect(opts.limit).toBe(50);
     expect(opts.width).toBe(1920);
     expect(opts.height).toBe(1080);
+    expect(opts.checkpointInterval).toBe(1000);
   });
 
   it('should pass through unknown CLI opts untouched', () => {

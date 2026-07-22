@@ -2,6 +2,7 @@
  * Retry mechanism with exponential backoff
  */
 
+import { safeUrlForDisplay } from './errors.js';
 import { log } from './output.js';
 
 /**
@@ -74,7 +75,7 @@ export async function withRetry(fn, opts = {}) {
       const jitter = Math.random() * baseDelay * 0.5;
       const delay = Math.min(exponentialDelay + jitter, maxDelay);
 
-      log.warn(`${label} failed (attempt ${attempt + 1}/${maxRetries + 1}): ${err.message}`);
+      log.warn(`${label} failed (attempt ${attempt + 1}/${maxRetries + 1})`);
       log.dim(`  Retrying in ${Math.round(delay)}ms...`);
 
       if (onRetry) {
@@ -101,7 +102,7 @@ export async function navigateWithRetry(page, url, opts = {}) {
     },
     {
       maxRetries,
-      label: `navigate to ${url.slice(0, 60)}`,
+      label: `navigate to ${safeUrlForDisplay(url)}`,
       ...retryOpts,
     },
   );

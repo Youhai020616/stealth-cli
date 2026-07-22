@@ -5,7 +5,6 @@
 import ora from "ora";
 import {
   launchBrowser,
-  closeBrowser,
   navigate,
   getSnapshot,
   getTextContent,
@@ -20,6 +19,7 @@ import { humanScroll, randomDelay, warmup } from "../humanize.js";
 import { formatOutput, log } from "../output.js";
 import { resolveOpts } from "../utils/resolve-opts.js";
 import { handleError, BlockedError } from "../errors.js";
+import { closeBrowserForCli } from "../utils/close-browser-cli.js";
 
 export function registerSearch(program) {
   program
@@ -61,6 +61,7 @@ export function registerSearch(program) {
           proxyRotate: opts.proxyRotate,
           profile: opts.profile,
           session: opts.session,
+          restoreSessionUrl: false,
         });
 
         const isGoogle = engine.toLowerCase() === "google";
@@ -172,9 +173,9 @@ export function registerSearch(program) {
         log.success(`Search complete: ${currentUrl}`);
       } catch (err) {
         spinner.stop();
-        handleError(err, { log });
+        process.exitCode = handleError(err, { log, exit: false });
       } finally {
-        if (handle) await closeBrowser(handle);
+        if (handle) await closeBrowserForCli(handle);
       }
     });
 }
