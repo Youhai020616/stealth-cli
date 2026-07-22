@@ -3,6 +3,7 @@
 .example.com	TRUE	/	FALSE	1893456000	test_cookie	test_value
 .example.com	TRUE	/path	TRUE	1893456000	secure_cookie	secure_value
 .other.com	TRUE	/	FALSE	1893456000	other_cookie	other_value
+#HttpOnly_.example.com	TRUE	/	TRUE	1893456000	http_only_cookie	http_only_value
 # Comment line should be ignored
 
 .example.com	TRUE	/	FALSE	0	session_cookie	session_value
