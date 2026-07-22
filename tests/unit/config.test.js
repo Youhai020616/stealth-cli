@@ -1,13 +1,14 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 
 const ORIGINAL_HOME = process.env.HOME;
 const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-config-home-'));
 process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
+vi.resetModules();
 
 const {
   loadConfig, setConfigValue, getConfigValue,
