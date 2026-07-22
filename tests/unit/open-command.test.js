@@ -46,7 +46,11 @@ import {
 } from '../../src/browser.js';
 import { createBrowserLifecycle } from '../../src/browser-lifecycle.js';
 import { log } from '../../src/output.js';
-import { registerOpen, runOpen } from '../../src/commands/open.js';
+import {
+  parseCheckpointInterval,
+  registerOpen,
+  runOpen,
+} from '../../src/commands/open.js';
 
 function lifecycleResult(overrides = {}) {
   return {
@@ -103,6 +107,7 @@ describe('open command', () => {
       profile: 'work',
       session: 'login',
       locale: 'en-US',
+      restoreSessionUrl: false,
     });
     expect(createBrowserLifecycle).toHaveBeenCalledWith(
       expect.any(Object),
@@ -110,6 +115,19 @@ describe('open command', () => {
     );
     expect(navigate).toHaveBeenCalledWith(expect.any(Object), 'https://example.com');
     expect(waitForReady).toHaveBeenCalledOnce();
+  });
+
+  it('should restore the saved session URL only when no explicit URL is supplied', async () => {
+    await runOpen(undefined, {
+      profile: 'work',
+      session: 'login',
+      checkpointInterval: 1000,
+    });
+
+    expect(launchBrowser).toHaveBeenCalledWith(expect.objectContaining({
+      restoreSessionUrl: true,
+    }));
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it('should accept --url as an alternative and reject conflicting URLs', async () => {
@@ -123,6 +141,57 @@ describe('open command', () => {
       url: 'https://b.example',
       checkpointInterval: 1000,
     })).rejects.toMatchObject({ code: 2 });
+  });
+
+  it('should strictly validate checkpoint intervals', () => {
+    expect(parseCheckpointInterval('250')).toBe(250);
+    expect(parseCheckpointInterval('60000')).toBe(60000);
+    expect(() => parseCheckpointInterval('abc')).toThrow('250 to 60000');
+    expect(() => parseCheckpointInterval('249')).toThrow('250 to 60000');
+    expect(() => parseCheckpointInterval('60001')).toThrow('250 to 60000');
+    expect(() => parseCheckpointInterval('1000.5')).toThrow('250 to 60000');
+  });
+
+  it('should warn when no persistence target was provided', async () => {
+    await runOpen('https://example.com', { checkpointInterval: 1000 });
+
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('will not be saved'));
+  });
+
+  it('should not expose query strings or fragments in spinner status', async () => {
+    await runOpen('https://example.com/callback?code=secret#token', {
+      profile: 'work',
+      checkpointInterval: 1000,
+    });
+
+    expect(spinner.text).toBe('Opening https://example.com...');
+    expect(spinner.text).not.toContain('secret');
+    expect(spinner.text).not.toContain('callback');
+  });
+
+  it('should preserve lifecycle signal results when setup errors race finalization', async () => {
+    const signalResult = lifecycleResult({
+      reason: 'signal',
+      signal: 'SIGTERM',
+      exitCode: 143,
+    });
+    const requestExit = vi.fn().mockResolvedValue(signalResult);
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'running',
+      start: vi.fn(),
+      wait: vi.fn().mockResolvedValue(signalResult),
+      requestExit,
+    });
+    navigate.mockRejectedValue(new Error('page closed during navigation'));
+
+    const result = await runOpen('https://example.com', {
+      profile: 'work',
+      checkpointInterval: 1000,
+    });
+
+    expect(requestExit).toHaveBeenCalledWith('command-error');
+    expect(result.reason).toBe('signal');
+    expect(process.exitCode).toBe(143);
   });
 
   it('should warn when a hard disconnect uses a durable checkpoint', async () => {

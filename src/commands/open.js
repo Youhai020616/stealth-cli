@@ -2,6 +2,7 @@
  * stealth open [url] - Open a headed browser for human authentication
  */
 
+import { InvalidArgumentError } from 'commander';
 import ora from 'ora';
 import {
   closeBrowser,
@@ -17,6 +18,31 @@ import {
 import { StealthError, handleError } from '../errors.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
+
+const MIN_CHECKPOINT_INTERVAL = 250;
+const MAX_CHECKPOINT_INTERVAL = 60_000;
+
+export function parseCheckpointInterval(value) {
+  const interval = Number(value);
+  if (
+    !Number.isInteger(interval) ||
+    interval < MIN_CHECKPOINT_INTERVAL ||
+    interval > MAX_CHECKPOINT_INTERVAL
+  ) {
+    throw new InvalidArgumentError(
+      `checkpoint interval must be an integer from ${MIN_CHECKPOINT_INTERVAL} to ${MAX_CHECKPOINT_INTERVAL}`,
+    );
+  }
+  return interval;
+}
+
+function describeTargetUrl(value) {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return 'requested URL';
+  }
+}
 
 function reportLifecycleResult(result, hasPersistenceTarget) {
   if (result.signal) {
@@ -58,6 +84,9 @@ export async function runOpen(positionalUrl, opts) {
 
   const targetUrl = opts.url || positionalUrl || null;
   const hasPersistenceTarget = Boolean(opts.profile || opts.session);
+  const checkpointInterval = parseCheckpointInterval(
+    opts.checkpointInterval ?? DEFAULT_CHECKPOINT_INTERVAL,
+  );
   const spinner = ora('Launching headed stealth browser...').start();
   let handle;
   let lifecycle;
@@ -73,10 +102,11 @@ export async function runOpen(positionalUrl, opts) {
       profile: opts.profile,
       session: opts.session,
       locale: opts.locale,
+      restoreSessionUrl: !targetUrl,
     });
 
     lifecycle = createBrowserLifecycle(handle, {
-      checkpointInterval: opts.checkpointInterval,
+      checkpointInterval,
       onCheckpointError(error) {
         if (error.message !== lastCheckpointWarning) {
           lastCheckpointWarning = error.message;
@@ -87,14 +117,18 @@ export async function runOpen(positionalUrl, opts) {
     signalGuard.transferTo(lifecycle);
 
     if (opts.cookies && lifecycle.phase === 'running') {
-      const { loadCookies } = await import('../cookies.js');
-      const result = await loadCookies(handle.context, opts.cookies);
-      log.info(result.message);
+      try {
+        const { loadCookies } = await import('../cookies.js');
+        const result = await loadCookies(handle.context, opts.cookies);
+        if (lifecycle.phase === 'running') log.info(result.message);
+      } catch (error) {
+        if (lifecycle.phase === 'running') throw error;
+      }
     }
 
     if (targetUrl && lifecycle.phase === 'running') {
       try {
-        spinner.text = `Opening ${targetUrl}...`;
+        spinner.text = `Opening ${describeTargetUrl(targetUrl)}...`;
         await navigate(handle, targetUrl);
         if (lifecycle.phase === 'running') {
           await waitForReady(handle.page);
@@ -109,7 +143,9 @@ export async function runOpen(positionalUrl, opts) {
       log.success('Headed browser is ready');
       log.info('Close all browser windows when authentication is complete.');
       if (hasPersistenceTarget) {
-        log.dim(`  State checkpoints every ${opts.checkpointInterval}ms`);
+        log.dim(`  State checkpoints every ${checkpointInterval}ms`);
+      } else {
+        log.warn('No --profile or --session was provided; authentication state will not be saved');
       }
     }
 
@@ -122,7 +158,10 @@ export async function runOpen(positionalUrl, opts) {
 
     if (lifecycle) {
       try {
-        await lifecycle.requestExit('command-error');
+        const result = await lifecycle.requestExit('command-error');
+        if (result.reason !== 'command-error') {
+          return reportLifecycleResult(result, hasPersistenceTarget);
+        }
       } catch (cleanupError) {
         if (cleanupError !== error) {
           log.warn(`Cleanup after failure was incomplete: ${cleanupError.message}`);
@@ -158,8 +197,9 @@ export function registerOpen(program) {
     .option('--locale <locale>', 'Browser locale')
     .option(
       '--checkpoint-interval <ms>',
-      'Authentication-state checkpoint interval in milliseconds',
-      String(DEFAULT_CHECKPOINT_INTERVAL),
+      `Authentication-state checkpoint interval (${MIN_CHECKPOINT_INTERVAL}-${MAX_CHECKPOINT_INTERVAL}ms)`,
+      parseCheckpointInterval,
+      DEFAULT_CHECKPOINT_INTERVAL,
     )
     .action(async (url, commandOpts) => {
       const opts = resolveOpts(commandOpts);

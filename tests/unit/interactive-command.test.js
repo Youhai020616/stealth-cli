@@ -66,6 +66,10 @@ vi.mock('../../src/humanize.js', () => ({
   randomDelay: vi.fn(),
 }));
 
+vi.mock('../../src/utils/resolve-opts.js', () => ({
+  resolveOpts: vi.fn((opts) => opts),
+}));
+
 vi.mock('../../src/output.js', () => ({
   log: {
     info: vi.fn(),
@@ -76,9 +80,10 @@ vi.mock('../../src/output.js', () => ({
   },
 }));
 
-import { launchBrowser } from '../../src/browser.js';
+import { launchBrowser, navigate } from '../../src/browser.js';
 import { createBrowserLifecycle } from '../../src/browser-lifecycle.js';
 import { registerInteractive } from '../../src/commands/interactive.js';
+import { log } from '../../src/output.js';
 
 describe('interactive command', () => {
   beforeEach(() => {
@@ -123,6 +128,91 @@ describe('interactive command', () => {
       session: 'login',
       headless: false,
       handleSignals: false,
+      restoreSessionUrl: true,
     }));
+  });
+
+  it('should skip a saved session URL when --url is explicit', async () => {
+    const program = new Command();
+    program.exitOverride();
+    registerInteractive(program);
+
+    await program.parseAsync([
+      'interactive',
+      '--url',
+      'https://example.com',
+      '--session',
+      'login',
+    ], { from: 'user' });
+
+    expect(launchBrowser).toHaveBeenCalledWith(expect.objectContaining({
+      restoreSessionUrl: false,
+    }));
+    expect(navigate).toHaveBeenCalledWith(expect.any(Object), 'https://example.com');
+  });
+
+  it('should preserve a signal result when navigation failure loses finalization arbitration', async () => {
+    const signalResult = {
+      reason: 'signal',
+      signal: 'SIGINT',
+      exitCode: 130,
+      usedCheckpointFallback: false,
+      cleanupErrors: [],
+    };
+    const requestExit = vi.fn().mockResolvedValue(signalResult);
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'running',
+      start: vi.fn(),
+      wait: vi.fn().mockResolvedValue(signalResult),
+      requestExit,
+    });
+    navigate.mockRejectedValue(new Error('page closed during navigation'));
+    const program = new Command();
+    program.exitOverride();
+    registerInteractive(program);
+
+    await program.parseAsync([
+      'interactive',
+      '--url',
+      'https://example.com',
+      '--profile',
+      'work',
+    ], { from: 'user' });
+
+    expect(requestExit).toHaveBeenCalledWith('command-error');
+    expect(process.exitCode).toBe(130);
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it('should preserve a signal result when cookie loading fails during finalization', async () => {
+    const signalResult = {
+      reason: 'signal',
+      signal: 'SIGTERM',
+      exitCode: 143,
+      usedCheckpointFallback: false,
+      cleanupErrors: [],
+    };
+    const requestExit = vi.fn().mockResolvedValue(signalResult);
+    createBrowserLifecycle.mockReturnValue({
+      phase: 'running',
+      start: vi.fn(),
+      wait: vi.fn().mockResolvedValue(signalResult),
+      requestExit,
+    });
+    const program = new Command();
+    program.exitOverride();
+    registerInteractive(program);
+
+    await program.parseAsync([
+      'interactive',
+      '--cookies',
+      '/definitely/missing/stealth-cookies.txt',
+      '--profile',
+      'work',
+    ], { from: 'user' });
+
+    expect(requestExit).toHaveBeenCalledWith('command-error');
+    expect(process.exitCode).toBe(143);
+    expect(log.error).not.toHaveBeenCalled();
   });
 });

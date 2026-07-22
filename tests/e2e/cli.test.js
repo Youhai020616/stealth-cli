@@ -1,10 +1,17 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(__dirname, '..', '..', 'bin', 'stealth.js');
+const TEST_STEALTH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-cli-e2e-'));
+
+afterAll(() => {
+  fs.rmSync(TEST_STEALTH_HOME, { recursive: true, force: true });
+});
 
 function run(args, opts = {}) {
   const timeout = opts.timeout || 60000;
@@ -12,7 +19,11 @@ function run(args, opts = {}) {
     const result = execFileSync('node', [CLI, ...args], {
       timeout,
       encoding: 'utf-8',
-      env: { ...process.env, NODE_NO_WARNINGS: '1' },
+      env: {
+        ...process.env,
+        NODE_NO_WARNINGS: '1',
+        STEALTH_HOME: TEST_STEALTH_HOME,
+      },
     });
     return { stdout: result, exitCode: 0 };
   } catch (err) {

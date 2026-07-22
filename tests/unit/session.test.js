@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import {
   getSession, saveSession, listSessions, deleteSession,
   captureSession, restoreSession, saveSessionSnapshot,
@@ -7,26 +7,20 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-const SESSIONS_DIR = path.join(os.homedir(), '.stealth', 'sessions');
-
-// Track test-created files for cleanup
-let existingFiles = [];
+const ORIGINAL_STEALTH_HOME = process.env.STEALTH_HOME;
+const TEST_STEALTH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-sessions-'));
+const SESSIONS_DIR = path.join(TEST_STEALTH_HOME, 'sessions');
+process.env.STEALTH_HOME = TEST_STEALTH_HOME;
 
 beforeEach(() => {
+  fs.rmSync(SESSIONS_DIR, { recursive: true, force: true });
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-  existingFiles = fs.readdirSync(SESSIONS_DIR);
 });
 
-afterEach(() => {
-  // Clean up test sessions only
-  try {
-    const files = fs.readdirSync(SESSIONS_DIR);
-    for (const f of files) {
-      if (!existingFiles.includes(f) && f.startsWith('__test_')) {
-        fs.unlinkSync(path.join(SESSIONS_DIR, f));
-      }
-    }
-  } catch {}
+afterAll(() => {
+  if (ORIGINAL_STEALTH_HOME === undefined) delete process.env.STEALTH_HOME;
+  else process.env.STEALTH_HOME = ORIGINAL_STEALTH_HOME;
+  fs.rmSync(TEST_STEALTH_HOME, { recursive: true, force: true });
 });
 
 describe('session', () => {
@@ -54,15 +48,30 @@ describe('session', () => {
     expect(reloaded.lastAccess).not.toBeNull();
     if (process.platform !== 'win32') {
       expect(fs.statSync(SESSIONS_DIR).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(path.join(SESSIONS_DIR, '__test_save.json')).mode & 0o777).toBe(0o600);
     }
   });
 
-  it('should sanitize session name for filesystem safety', () => {
-    // Names with special chars should still work
+  it('should accept safe session names and reject path-like names', () => {
     const session = getSession('__test_a_b_c_d');
     saveSession('__test_a_b_c_d', session);
     const reloaded = getSession('__test_a_b_c_d');
     expect(reloaded.name).toBe('__test_a_b_c_d');
+
+    expect(() => getSession('../outside')).toThrow('only letters');
+    expect(() => saveSession('session.json', session)).toThrow('only letters');
+  });
+
+  it('should harden legacy session file permissions when loading', () => {
+    if (process.platform === 'win32') return;
+    const session = getSession('__test_legacy_mode');
+    saveSession('__test_legacy_mode', session);
+    const filePath = path.join(SESSIONS_DIR, '__test_legacy_mode.json');
+    fs.chmodSync(filePath, 0o644);
+
+    getSession('__test_legacy_mode');
+
+    expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
   });
 
   it('should delete a session', () => {
@@ -114,6 +123,18 @@ describe('session', () => {
 
     expect(restored.cookiesRestored).toBe(0);
     expect(context.addCookies).not.toHaveBeenCalled();
+  });
+
+  it('should reject changing an existing session profile binding while saving', () => {
+    saveSessionSnapshot('__test_write_mismatch', {
+      cookies: [],
+      lastUrl: 'https://example.com',
+    }, { profile: 'profile-a' });
+
+    expect(() => saveSessionSnapshot('__test_write_mismatch', {
+      cookies: [],
+      lastUrl: 'https://example.com/account',
+    }, { profile: 'profile-b' })).toThrow('belongs to profile');
   });
 
   it('should reject a session linked to a different profile', async () => {

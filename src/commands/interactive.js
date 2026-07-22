@@ -35,6 +35,14 @@ import { log } from "../output.js";
 import { resolveOpts } from "../utils/resolve-opts.js";
 import { StealthError, handleError } from "../errors.js";
 
+function describeUrl(value) {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return 'current page';
+  }
+}
+
 const HELP_TEXT = `
 ${chalk.bold("Navigation:")}
   ${chalk.cyan("goto <url>")}            Navigate to a URL
@@ -88,6 +96,19 @@ export function registerInteractive(program) {
       let cleanupIncomplete = false;
       let lastCheckpointWarning = null;
       const signalGuard = createLaunchSignalGuard();
+      const applyLifecycleResult = (result) => {
+        if (result.usedCheckpointFallback && result.persistedAt) {
+          log.warn(
+            `Browser closed before a final live snapshot; using checkpoint from ${result.persistedAt}`,
+          );
+        }
+        if (result.cleanupErrors?.length > 0) {
+          cleanupIncomplete = true;
+          const targets = result.cleanupErrors.map(({ target }) => target).join(", ");
+          log.warn(`Browser cleanup was incomplete (${targets})`);
+        }
+        if (result.exitCode) process.exitCode = result.exitCode;
+      };
 
       try {
         handle = await launchBrowser({
@@ -97,6 +118,7 @@ export function registerInteractive(program) {
           session: opts.session,
           forceDirect: opts.headless === false || Boolean(opts.cookies),
           handleSignals: false,
+          restoreSessionUrl: !opts.url,
         });
 
         if (!handle.isDaemon) {
@@ -113,17 +135,33 @@ export function registerInteractive(program) {
           signalGuard.dispose();
         }
 
-        if (opts.cookies && !handle.isDaemon) {
-          const { loadCookies } = await import("../cookies.js");
-          const result = await loadCookies(handle.context, opts.cookies);
-          log.info(result.message);
+        if (opts.cookies && !handle.isDaemon && lifecycle.phase === "running") {
+          try {
+            const { loadCookies } = await import("../cookies.js");
+            const result = await loadCookies(handle.context, opts.cookies);
+            if (lifecycle.phase === "running") log.info(result.message);
+          } catch (error) {
+            if (lifecycle.phase === "running") throw error;
+          }
         }
 
-        if (opts.url) {
-          await navigate(handle, opts.url);
-          if (!handle.isDaemon) {
-            await waitForReady(handle.page);
+        if (opts.url && (!lifecycle || lifecycle.phase === "running")) {
+          try {
+            await navigate(handle, opts.url);
+            if (!handle.isDaemon && lifecycle.phase === "running") {
+              await waitForReady(handle.page);
+            }
+          } catch (error) {
+            if (!lifecycle || lifecycle.phase === "running") throw error;
           }
+        }
+
+        if (lifecycle && lifecycle.phase !== "running") {
+          spinner.stop();
+          const result = await lifecycle.wait();
+          applyLifecycleResult(result);
+          log.success("Bye! 🦊");
+          return;
         }
 
         spinner.stop();
@@ -133,7 +171,7 @@ export function registerInteractive(program) {
 
         if (opts.url) {
           const currentUrl = await getUrl(handle);
-          log.info(`Current page: ${currentUrl}`);
+          log.info(`Current page: ${describeUrl(currentUrl)}`);
         }
 
         rl = createInterface({
@@ -424,18 +462,7 @@ export function registerInteractive(program) {
           const result = await lifecycle.wait();
           rl.close();
           await readlineClosed;
-
-          if (result.usedCheckpointFallback && result.persistedAt) {
-            log.warn(
-              `Browser closed before a final live snapshot; using checkpoint from ${result.persistedAt}`,
-            );
-          }
-          if (result.cleanupErrors?.length > 0) {
-            cleanupIncomplete = true;
-            const targets = result.cleanupErrors.map(({ target }) => target).join(", ");
-            log.warn(`Browser cleanup was incomplete (${targets})`);
-          }
-          if (result.exitCode) process.exitCode = result.exitCode;
+          applyLifecycleResult(result);
         } else {
           await readlineClosed;
           await closeBrowser(handle);
@@ -446,14 +473,22 @@ export function registerInteractive(program) {
         } else {
           log.success("Bye! 🦊");
         }
-      } catch (err) {
+      } catch (caughtError) {
+        let err = caughtError;
         spinner.stop();
         signalGuard.dispose();
         if (rl) rl.close();
+
         if (lifecycle) {
           try {
-            await lifecycle.requestExit("command-error");
-          } catch {}
+            const result = await lifecycle.requestExit("command-error");
+            if (result.reason !== "command-error") {
+              applyLifecycleResult(result);
+              return;
+            }
+          } catch (lifecycleError) {
+            err = lifecycleError;
+          }
         } else if (handle) {
           const cleanup = await closeBrowser(handle);
           if (cleanup.cleanupErrors.length > 0) {

@@ -5,7 +5,7 @@
 import fs from 'fs';
 import ora from 'ora';
 import {
-  launchBrowser, closeBrowser, navigate, getTextContent,
+  launchBrowser, navigate, getTextContent,
   getTitle, takeScreenshot, waitForReady,
 } from '../browser.js';
 import { navigateWithRetry } from '../retry.js';
@@ -13,6 +13,7 @@ import { randomDelay } from '../humanize.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 import { handleError } from '../errors.js';
+import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 
 export function registerBatch(program) {
   program
@@ -174,9 +175,9 @@ export function registerBatch(program) {
       } catch (err) {
         spinner.stop();
         log.dim(`  Completed: ${success}/${urls.length}`);
-        handleError(err, { log });
+        process.exitCode = handleError(err, { log, exit: false });
       } finally {
-        if (handle) await closeBrowser(handle);
+        if (handle) await closeBrowserForCli(handle);
       }
     });
 }

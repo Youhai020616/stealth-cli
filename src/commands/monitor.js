@@ -4,11 +4,12 @@
 
 import ora from 'ora';
 import chalk from 'chalk';
-import { launchBrowser, closeBrowser, navigate, waitForReady } from '../browser.js';
+import { launchBrowser, navigate, waitForReady } from '../browser.js';
 import { randomDelay } from '../humanize.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 import { handleError } from '../errors.js';
+import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 
 export function registerMonitor(program) {
   program
@@ -53,7 +54,8 @@ export function registerMonitor(program) {
 
         if (handle.isDaemon) {
           log.error('Monitor requires direct mode');
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
 
         // Main monitoring loop
@@ -154,9 +156,9 @@ export function registerMonitor(program) {
         console.log();
         log.success(`Monitoring complete: ${checkCount} checks, ${changeCount} changes`);
       } catch (err) {
-        handleError(err, { log });
+        process.exitCode = handleError(err, { log, exit: false });
       } finally {
-        if (handle) await closeBrowser(handle);
+        if (handle) await closeBrowserForCli(handle);
       }
     });
 }

@@ -12,22 +12,29 @@
 
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import { ProfileError } from './errors.js';
-import { writeJsonAtomic } from './utils/json-file.js';
-
-const SESSIONS_DIR = path.join(os.homedir(), '.stealth', 'sessions');
+import {
+  ensurePrivateDirectory,
+  ensurePrivateFile,
+  writeJsonAtomic,
+} from './utils/json-file.js';
+import { assertStateName, getSessionsDir } from './utils/storage-paths.js';
 
 function ensureDir() {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
+  const directory = getSessionsDir();
   try {
-    fs.chmodSync(SESSIONS_DIR, 0o700);
-  } catch {}
+    ensurePrivateDirectory(directory);
+  } catch (cause) {
+    throw new ProfileError('Browser session storage is not private', {
+      hint: `Fix permissions for: ${directory}`,
+      cause,
+    });
+  }
+  return directory;
 }
 
 function sessionPath(name) {
-  const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return path.join(SESSIONS_DIR, `${safeName}.json`);
+  return path.join(getSessionsDir(), `${assertStateName(name, 'Session')}.json`);
 }
 
 /**
@@ -39,6 +46,7 @@ export function getSession(name) {
 
   if (fs.existsSync(filePath)) {
     try {
+      ensurePrivateFile(filePath);
       return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     } catch (error) {
       throw new ProfileError(`Session "${name}" is corrupted`, {
@@ -107,6 +115,12 @@ export function saveSessionSnapshot(name, snapshot, opts = {}) {
   }
 
   if (opts.profile) {
+    if (session.profile && session.profile !== opts.profile) {
+      throw new ProfileError(
+        `Session "${name}" belongs to profile "${session.profile}", not "${opts.profile}"`,
+        { hint: 'Use the linked profile or choose a different --session name' },
+      );
+    }
     session.profile = opts.profile;
   }
 
@@ -179,12 +193,14 @@ export async function restoreSession(name, context, opts = {}) {
  * List all sessions
  */
 export function listSessions() {
-  ensureDir();
-  const files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json'));
+  const directory = ensureDir();
+  const files = fs.readdirSync(directory).filter((f) => f.endsWith('.json'));
 
   return files.map((f) => {
     try {
-      const session = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf-8'));
+      const filePath = path.join(directory, f);
+      ensurePrivateFile(filePath);
+      const session = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       return {
         name: session.name,
         lastUrl: session.lastUrl || '-',

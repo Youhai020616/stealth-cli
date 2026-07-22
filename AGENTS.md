@@ -16,8 +16,8 @@ src/
   client.js              — HTTP client for daemon communication
   daemon-entry.js        — Daemon process entrypoint
   config.js              — Global config (~/.stealth/config.json)
-  profiles.js            — Browser identity profiles (~/.stealth/profiles/)
-  session.js             — Session persistence (cookies + state)
+  profiles.js            — Browser identity profiles ($STEALTH_HOME/profiles; default ~/.stealth/profiles/)
+  session.js             — Session persistence (cookies + state under $STEALTH_HOME/sessions)
   cookies.js             — Netscape cookie file parser
   proxy-pool.js          — Proxy rotation pool
   humanize.js            — Human behavior simulation (scroll, mouse, type)
@@ -28,8 +28,11 @@ src/
   mcp-server.js          — MCP server (stdio JSON-RPC) for AI agents
   utils/
     browser-factory.js   — Shared browser bootstrap (getHostOS, createBrowser, TEXT_EXTRACT_SCRIPT)
+    close-browser-cli.js — CLI close wrapper that surfaces persistence and cleanup failures
     json-file.js         — Atomic owner-only writes for profile/session auth state
     resolve-opts.js      — Merge global config + CLI opts (used by all core commands)
+    state-lock.js        — Single-writer profile/session locks held for browser lifetime
+    storage-paths.js     — STEALTH_HOME profile/session/lock paths + strict state-name validation
   extractors/
     index.js             — Extractor registry (by engine name or URL)
     base.js              — Generic fallback extractor
@@ -50,7 +53,11 @@ tests/
 - **Two modes**: Direct mode (new browser per command) vs Daemon mode (reuse background browser via unix socket HTTP server)
 - `browser.js` detects daemon automatically; headed, stateful, proxied, or `forceDirect` launches always bypass it
 - `open` and direct `interactive` own SIGINT/SIGTERM/SIGHUP handling so state is checkpointed before shutdown
+- Named profile/session browser state is single-writer and remains locked until `closeBrowser()` releases the handle
+- A session-only launch restores its linked profile; invalid state names or a missing linked profile fail before browser launch
+- SDK `closeBrowser()` remains best-effort, while CLI commands surface close-time persistence failures with a non-zero exit status
 - All browser launch goes through `camoufox-js` `launchOptions()` → `playwright-core` `firefox.launch()`. Never use `chromium.launch()` or `playwright` (non-core)
+- `STEALTH_HOME` overrides profile, session, and lock storage; config, proxy-pool, and daemon paths still use `~/.stealth`
 - Daemon socket: `~/.stealth/daemon.sock`, PID: `~/.stealth/daemon.pid`
 
 ## camoufox-js API (DO NOT GUESS)
@@ -77,9 +84,9 @@ const browser = await firefox.launch(options);
 ## Error Handling
 
 Custom error hierarchy in `src/errors.js`. Exit codes:
-- 0=success, 1=general, 2=args, 3=browser launch, 4=navigation, 5=extraction, 6=timeout, 7=proxy, 8=profile
+- 0=success, 1=general, 2=args, 3=browser launch, 4=navigation, 5=extraction, 6=timeout, 7=proxy, 8=profile/session/persistence error
 - All errors extend `StealthError` with `.code`, `.hint`, `.format()`
-- Use specific error classes: `BrowserLaunchError`, `NavigationError`, `ExtractionError`, `TimeoutError`, `ProxyError`, `ProfileError`, `BlockedError`
+- Use specific error classes: `BrowserLaunchError`, `NavigationError`, `ExtractionError`, `TimeoutError`, `ProxyError`, `ProfileError`, `PersistenceError`, `BlockedError`
 - `handleError(err)` prints message + hint and calls `process.exit(code)`
 
 ## Coding Conventions

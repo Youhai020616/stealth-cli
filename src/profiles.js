@@ -12,12 +12,14 @@
 
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import crypto from 'crypto';
 import { ProfileError } from './errors.js';
-import { writeJsonAtomic } from './utils/json-file.js';
-
-const PROFILES_DIR = path.join(os.homedir(), '.stealth', 'profiles');
+import {
+  ensurePrivateDirectory,
+  ensurePrivateFile,
+  writeJsonAtomic,
+} from './utils/json-file.js';
+import { assertStateName, getProfilesDir } from './utils/storage-paths.js';
 
 // Realistic fingerprint presets
 const FINGERPRINT_PRESETS = {
@@ -106,19 +108,23 @@ const LOCALES = [
  * Ensure profiles directory exists
  */
 function ensureDir() {
-  fs.mkdirSync(PROFILES_DIR, { recursive: true, mode: 0o700 });
+  const directory = getProfilesDir();
   try {
-    fs.chmodSync(PROFILES_DIR, 0o700);
-  } catch {}
+    ensurePrivateDirectory(directory);
+  } catch (cause) {
+    throw new ProfileError('Browser profile storage is not private', {
+      hint: `Fix permissions for: ${directory}`,
+      cause,
+    });
+  }
+  return directory;
 }
 
 /**
  * Get path to a profile file
  */
 function profilePath(name) {
-  // Sanitize name
-  const safeName = name.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return path.join(PROFILES_DIR, `${safeName}.json`);
+  return path.join(getProfilesDir(), `${assertStateName(name, 'Profile')}.json`);
 }
 
 /**
@@ -204,6 +210,7 @@ export function loadProfile(name) {
 
   let profile;
   try {
+    ensurePrivateFile(filePath);
     profile = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
   } catch (error) {
     throw new ProfileError(`Profile "${name}" is corrupted`, {
@@ -289,12 +296,14 @@ export async function loadCookiesFromProfile(name, context) {
  * List all profiles
  */
 export function listProfiles() {
-  ensureDir();
-  const files = fs.readdirSync(PROFILES_DIR).filter((f) => f.endsWith('.json'));
+  const directory = ensureDir();
+  const files = fs.readdirSync(directory).filter((f) => f.endsWith('.json'));
 
   return files.map((f) => {
     try {
-      const profile = JSON.parse(fs.readFileSync(path.join(PROFILES_DIR, f), 'utf-8'));
+      const filePath = path.join(directory, f);
+      ensurePrivateFile(filePath);
+      const profile = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       return {
         name: profile.name,
         locale: profile.fingerprint?.locale || '?',

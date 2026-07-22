@@ -4,12 +4,13 @@
 
 import ora from 'ora';
 import {
-  launchBrowser, closeBrowser, navigate, getSnapshot,
+  launchBrowser, navigate, getSnapshot,
   getTextContent, getTitle, getUrl, evaluate, waitForReady,
 } from '../browser.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 import { handleError } from '../errors.js';
+import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 
 export function registerBrowse(program) {
   program
@@ -41,6 +42,7 @@ export function registerBrowse(program) {
           profile: opts.profile,
           session: opts.session,
           locale: opts.locale,
+          restoreSessionUrl: false,
         });
 
         // Load cookies if provided (direct mode only)
@@ -95,9 +97,9 @@ export function registerBrowse(program) {
         log.success(`Done: ${currentUrl}`);
       } catch (err) {
         spinner.stop();
-        handleError(err, { log });
+        process.exitCode = handleError(err, { log, exit: false });
       } finally {
-        if (handle) await closeBrowser(handle);
+        if (handle) await closeBrowserForCli(handle);
       }
     });
 }

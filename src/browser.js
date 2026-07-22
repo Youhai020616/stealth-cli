@@ -35,6 +35,7 @@ import {
   ProfileError,
 } from "./errors.js";
 import { buildA11yTree, clickByRef, typeByRef, hoverByRef } from "./a11y.js";
+import { acquireStateLocks } from "./utils/state-lock.js";
 
 const closeOperations = new WeakMap();
 
@@ -86,6 +87,7 @@ function buildProxy(proxyStr) {
  * @param {boolean} [opts.humanize] - Enable human behavior simulation
  * @param {boolean} [opts.forceDirect=false] - Never route through the daemon
  * @param {boolean} [opts.handleSignals=true] - Let Playwright own process signal handling
+ * @param {boolean} [opts.restoreSessionUrl=true] - Navigate to the session's saved URL
  * @returns {Promise<{ browser, context, page, isDaemon, _meta }>}
  */
 export async function launchBrowser(opts = {}) {
@@ -101,94 +103,89 @@ export async function launchBrowser(opts = {}) {
     humanize = false,
     forceDirect = false,
     handleSignals = true,
+    restoreSessionUrl = true,
   } = opts;
 
-  // --- Load profile if specified ---
-  let profileData = null;
-  if (profileName) {
-    profileData = loadProfile(profileName);
-    const fp = profileData.fingerprint;
-    locale = fp.locale || locale;
-    timezone = fp.timezone || timezone;
-    viewport = fp.viewport || viewport;
-    if (profileData.proxy && !proxyStr) {
-      proxyStr = profileData.proxy;
-    }
-  }
+  // A linked session carries its profile identity even when --profile is not
+  // repeated. Re-read it after locking before trusting any mutable state.
+  let sessionMetadata = sessionName ? getSession(sessionName) : null;
+  if (!profileName && sessionMetadata?.profile) profileName = sessionMetadata.profile;
 
-  // Validate profile/session identity before launching a browser. A linked
-  // session must never merge authentication state from another profile.
-  if (profileName && sessionName) {
-    const session = getSession(sessionName);
-    if (session.profile && session.profile !== profileName) {
-      throw new ProfileError(
-        `Session "${sessionName}" belongs to profile "${session.profile}", not "${profileName}"`,
-        { hint: 'Use the linked profile or choose a different --session name' },
-      );
-    }
-  }
-
-  if (profileName) touchProfile(profileName);
-
-  // --- Proxy pool rotation ---
-  if (proxyRotate && !proxyStr) {
-    proxyStr = getNextProxy();
-  }
-
-  // A headed or stateful browser requires its own local context. Reusing a
-  // daemon here would ignore the requested window and persistence semantics.
-  if (
-    !forceDirect &&
-    headless !== false &&
-    !proxyStr &&
-    !profileName &&
-    !sessionName &&
-    isDaemonRunning()
-  ) {
-    return {
-      browser: null,
-      context: null,
-      page: null,
-      isDaemon: true,
-      _meta: { profileName, sessionName, proxyUrl: null },
-    };
-  }
-
-  const hostOS = profileData?.fingerprint?.os || getHostOS();
-  const proxy = buildProxy(proxyStr);
-
+  const releaseStateLocks = acquireStateLocks({
+    profile: profileName,
+    session: sessionName,
+  });
   let browser;
-  try {
-    browser = await createBrowser({
-      headless,
-      os: hostOS,
-      proxy: proxy || undefined,
-      handleSignals,
-    });
-  } catch (err) {
-    throw new BrowserLaunchError(err.message, { cause: err });
-  }
-
-  const contextOptions = {
-    viewport,
-    permissions: ["geolocation"],
-  };
-
-  if (!proxy) {
-    contextOptions.locale = locale;
-    contextOptions.timezoneId = timezone;
-    const geo = profileData?.fingerprint?.geo || {
-      latitude: 37.7749,
-      longitude: -122.4194,
-    };
-    contextOptions.geolocation = geo;
-  }
-
   let context;
-  let page;
-  let sessionInfo = null;
 
   try {
+    let profileData = null;
+    if (profileName) {
+      profileData = loadProfile(profileName);
+      const fp = profileData.fingerprint;
+      locale = fp.locale || locale;
+      timezone = fp.timezone || timezone;
+      viewport = fp.viewport || viewport;
+      if (profileData.proxy && !proxyStr) proxyStr = profileData.proxy;
+    }
+
+    if (sessionName) {
+      sessionMetadata = getSession(sessionName);
+      if (sessionMetadata.profile && sessionMetadata.profile !== profileName) {
+        throw new ProfileError(
+          `Session "${sessionName}" belongs to profile "${sessionMetadata.profile}", not "${profileName}"`,
+          { hint: 'Use the linked profile or choose a different --session name' },
+        );
+      }
+    }
+
+    if (profileName) touchProfile(profileName);
+    if (proxyRotate && !proxyStr) proxyStr = getNextProxy();
+
+    if (
+      !forceDirect &&
+      headless !== false &&
+      !proxyStr &&
+      !profileName &&
+      !sessionName &&
+      isDaemonRunning()
+    ) {
+      releaseStateLocks();
+      return {
+        browser: null,
+        context: null,
+        page: null,
+        isDaemon: true,
+        _meta: { profileName, sessionName, proxyUrl: null },
+      };
+    }
+
+    const hostOS = profileData?.fingerprint?.os || getHostOS();
+    const proxy = buildProxy(proxyStr);
+    try {
+      browser = await createBrowser({
+        headless,
+        os: hostOS,
+        proxy: proxy || undefined,
+        handleSignals,
+      });
+    } catch (cause) {
+      throw new BrowserLaunchError(cause.message, { cause });
+    }
+
+    const contextOptions = {
+      viewport,
+      permissions: ["geolocation"],
+    };
+    if (!proxy) {
+      contextOptions.locale = locale;
+      contextOptions.timezoneId = timezone;
+      contextOptions.geolocation = profileData?.fingerprint?.geo || {
+        latitude: 37.7749,
+        longitude: -122.4194,
+      };
+    }
+
     context = await browser.newContext(contextOptions);
 
     if (profileName) {
@@ -202,6 +199,7 @@ export async function launchBrowser(opts = {}) {
       }
     }
 
+    let sessionInfo = null;
     if (sessionName) {
       try {
         sessionInfo = await restoreSession(sessionName, context, {
@@ -216,9 +214,12 @@ export async function launchBrowser(opts = {}) {
       }
     }
 
-    page = await context.newPage();
-
-    if (sessionInfo?.lastUrl && sessionInfo.lastUrl !== "about:blank") {
+    const page = await context.newPage();
+    if (
+      restoreSessionUrl &&
+      sessionInfo?.lastUrl &&
+      sessionInfo.lastUrl !== "about:blank"
+    ) {
       try {
         await page.goto(sessionInfo.lastUrl, {
           waitUntil: "domcontentloaded",
@@ -230,33 +231,40 @@ export async function launchBrowser(opts = {}) {
         );
       }
     }
+
+    let lastKnownUrl = 'about:blank';
+    try {
+      lastKnownUrl = page.url();
+    } catch {}
+
+    return {
+      browser,
+      context,
+      page,
+      isDaemon: false,
+      _meta: {
+        profileName,
+        sessionName,
+        proxyUrl: proxyStr,
+        sessionInfo,
+        lastKnownUrl,
+        releaseStateLocks,
+      },
+    };
   } catch (error) {
     if (context) await context.close().catch(() => {});
-    await browser.close().catch(() => {});
-    if (error instanceof ProfileError) throw error;
-    throw new BrowserLaunchError(`Browser initialization failed: ${error.message}`, {
-      cause: error,
-    });
+    if (browser) await browser.close().catch(() => {});
+    try {
+      releaseStateLocks();
+    } catch {}
+    if (error instanceof ProfileError || error instanceof BrowserLaunchError) throw error;
+    if (browser) {
+      throw new BrowserLaunchError(`Browser initialization failed: ${error.message}`, {
+        cause: error,
+      });
+    }
+    throw error;
   }
-
-  let lastKnownUrl = 'about:blank';
-  try {
-    lastKnownUrl = page.url();
-  } catch {}
-
-  return {
-    browser,
-    context,
-    page,
-    isDaemon: false,
-    _meta: {
-      profileName,
-      sessionName,
-      proxyUrl: proxyStr,
-      sessionInfo,
-      lastKnownUrl,
-    },
-  };
 }
 
 /**
@@ -432,6 +440,13 @@ export async function closeBrowser(handle, opts = {}) {
           await browser.close();
         } catch (error) {
           cleanupErrors.push({ target: 'browser', error });
+        }
+      }
+      if (handle._meta?.releaseStateLocks) {
+        try {
+          handle._meta.releaseStateLocks();
+        } catch (error) {
+          cleanupErrors.push({ target: 'state-lock', error });
         }
       }
 

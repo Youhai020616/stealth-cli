@@ -2,6 +2,36 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
+function enforcePrivateMode(targetPath, mode) {
+  if (process.platform === 'win32') return;
+
+  let chmodError = null;
+  try {
+    fs.chmodSync(targetPath, mode);
+  } catch (error) {
+    chmodError = error;
+  }
+
+  const actualMode = fs.statSync(targetPath).mode & 0o777;
+  if ((actualMode & 0o077) !== 0) {
+    const error = new Error(
+      `Sensitive state path has insecure permissions: ${targetPath} (${actualMode.toString(8)})`,
+      { cause: chmodError || undefined },
+    );
+    error.code = 'EINSECUREPERMISSIONS';
+    throw error;
+  }
+}
+
+export function ensurePrivateDirectory(directory) {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  enforcePrivateMode(directory, 0o700);
+}
+
+export function ensurePrivateFile(filePath, mode = 0o600) {
+  enforcePrivateMode(filePath, mode);
+}
+
 /**
  * Atomically write sensitive JSON data with owner-only permissions.
  *
@@ -22,7 +52,7 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
     `.${path.basename(filePath)}.${process.pid}.${crypto.randomUUID()}.tmp`,
   );
 
-  fs.mkdirSync(directory, { recursive: true });
+  ensurePrivateDirectory(directory);
 
   let fileDescriptor;
   try {
@@ -32,13 +62,8 @@ export function writeJsonAtomic(filePath, value, opts = {}) {
     fs.closeSync(fileDescriptor);
     fileDescriptor = undefined;
 
+    ensurePrivateFile(tempPath, mode);
     fs.renameSync(tempPath, filePath);
-
-    // Existing files may have been created before owner-only permissions were
-    // enforced. Best effort is sufficient on platforms without POSIX modes.
-    try {
-      fs.chmodSync(filePath, mode);
-    } catch {}
 
     // Best-effort directory sync makes the rename durable across sudden power
     // loss on filesystems that support syncing directory descriptors.

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterAll, afterEach } from 'vitest';
 import {
   createProfile, loadProfile, deleteProfile,
   listProfiles, getPresets, saveCookiesToProfile,
@@ -9,10 +9,19 @@ import {
 } from '../../src/profiles.js';
 
 const TEST_PROFILE = '__vitest_test_profile__';
-const PROFILES_DIR = path.join(os.homedir(), '.stealth', 'profiles');
+const ORIGINAL_STEALTH_HOME = process.env.STEALTH_HOME;
+const TEST_STEALTH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-profiles-'));
+const PROFILES_DIR = path.join(TEST_STEALTH_HOME, 'profiles');
+process.env.STEALTH_HOME = TEST_STEALTH_HOME;
 
 afterEach(() => {
   try { deleteProfile(TEST_PROFILE); } catch {}
+});
+
+afterAll(() => {
+  if (ORIGINAL_STEALTH_HOME === undefined) delete process.env.STEALTH_HOME;
+  else process.env.STEALTH_HOME = ORIGINAL_STEALTH_HOME;
+  fs.rmSync(TEST_STEALTH_HOME, { recursive: true, force: true });
 });
 
 describe('profiles', () => {
@@ -25,6 +34,7 @@ describe('profiles', () => {
     expect(p.useCount).toBe(0);
     if (process.platform !== 'win32') {
       expect(fs.statSync(PROFILES_DIR).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(path.join(PROFILES_DIR, `${TEST_PROFILE}.json`)).mode & 0o777).toBe(0o600);
     }
   });
 
@@ -51,6 +61,11 @@ describe('profiles', () => {
       loadProfile(TEST_PROFILE);
       expect(fs.statSync(PROFILES_DIR).mode & 0o777).toBe(0o700);
     }
+  });
+
+  it('should reject unsafe profile names before resolving a file path', () => {
+    expect(() => createProfile('../outside', { random: true })).toThrow('only letters');
+    expect(() => loadProfile('work.json')).toThrow('only letters');
   });
 
   it('should throw when profile not found', () => {

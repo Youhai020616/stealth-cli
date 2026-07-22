@@ -3,10 +3,11 @@
  */
 
 import ora from 'ora';
-import { launchBrowser, closeBrowser, navigate, waitForReady } from '../browser.js';
+import { launchBrowser, navigate, waitForReady } from '../browser.js';
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 import { handleError } from '../errors.js';
+import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 
 export function registerPdf(program) {
   program
@@ -44,7 +45,8 @@ export function registerPdf(program) {
           spinner.stop();
           log.error('PDF generation requires direct mode (daemon does not support it)');
           log.dim('  Tip: stop daemon first or use --profile to force direct mode');
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
 
         if (opts.cookies) {
@@ -103,9 +105,9 @@ export function registerPdf(program) {
         log.dim(`  Format: ${opts.format}${opts.landscape ? ' landscape' : ''}`);
       } catch (err) {
         spinner.stop();
-        handleError(err, { log });
+        process.exitCode = handleError(err, { log, exit: false });
       } finally {
-        if (handle) await closeBrowser(handle);
+        if (handle) await closeBrowserForCli(handle);
       }
     });
 }

@@ -209,6 +209,8 @@ describe('browser lifecycle', () => {
 
     expect(result.reason).toBe('disconnected');
     expect(result.usedCheckpointFallback).toBe(true);
+    expect(result.persistenceIncomplete).toBe(false);
+    expect(result.exitCode).toBe(0);
     expect(harness.captureState).toHaveBeenCalledTimes(capturesBeforeDisconnect);
     expect(harness.close).toHaveBeenCalledOnce();
   });
@@ -286,6 +288,52 @@ describe('browser lifecycle', () => {
 
     expect(writeSnapshot).toHaveBeenCalledTimes(2);
     expect(result.persistence.profile.cookies).toBe(1);
+  });
+
+  it('should treat a successful cached retry as a fresh final save', async () => {
+    const writeSnapshot = vi.fn()
+      .mockResolvedValueOnce({
+        results: { profile: { name: 'work', cookies: 1 }, session: null },
+      })
+      .mockRejectedValueOnce(new Error('temporary final write failure'))
+      .mockResolvedValueOnce({
+        results: { profile: { name: 'work', cookies: 1 }, session: null },
+      });
+    const harness = createHarness({ writeSnapshot });
+    harness.lifecycle.start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    harness.page.closePage();
+    const result = await harness.lifecycle.wait();
+
+    expect(writeSnapshot).toHaveBeenCalledTimes(3);
+    expect(result.usedCheckpointFallback).toBe(false);
+    expect(result.persistenceIncomplete).toBe(false);
+    expect(result.finalCaptureError).toBeNull();
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('should fail when a fresh final capture is unavailable despite a stale checkpoint', async () => {
+    const durableSnapshot = {
+      cookies: [{ name: 'sid', value: 'checkpoint' }],
+      lastUrl: 'https://example.com',
+      capturedAt: new Date().toISOString(),
+    };
+    const captureState = vi.fn()
+      .mockResolvedValueOnce(durableSnapshot)
+      .mockRejectedValueOnce(new Error('final capture unavailable'));
+    const harness = createHarness({ captureState });
+    harness.lifecycle.start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    harness.page.closePage();
+    const result = await harness.lifecycle.wait();
+
+    expect(result.usedCheckpointFallback).toBe(true);
+    expect(result.persistenceIncomplete).toBe(true);
+    expect(result.finalCaptureError?.message).toBe('final capture unavailable');
+    expect(result.exitCode).toBe(8);
+    expect(result.persistedAt).not.toBeNull();
   });
 
   it('should finalize exactly once when signal and page close race', async () => {

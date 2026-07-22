@@ -323,6 +323,7 @@ export function createBrowserLifecycle(handle, opts = {}) {
     await drainCheckpoints();
 
     let finalCaptureError = null;
+    let finalSnapshot = null;
     const canCaptureFresh = [
       'last-page-closed',
       'readline-closed',
@@ -331,16 +332,27 @@ export function createBrowserLifecycle(handle, opts = {}) {
     ].includes(reason) && browserIsConnected();
 
     if (hasPersistenceTarget && canCaptureFresh) {
+      const previousSnapshot = latestCaptured;
       try {
         await performCheckpoint();
+        finalSnapshot = latestCaptured;
       } catch (error) {
         finalCaptureError = error;
+        if (latestCaptured !== previousSnapshot) finalSnapshot = latestCaptured;
       }
     }
 
     if (hasPersistenceTarget) {
       await persistCachedSnapshot();
     }
+
+    const finalSnapshotPersisted = Boolean(
+      finalSnapshot && latestPersisted?.snapshot === finalSnapshot,
+    );
+    if (finalSnapshotPersisted) finalCaptureError = null;
+    const persistenceIncomplete = Boolean(
+      hasPersistenceTarget && canCaptureFresh && !finalSnapshotPersisted,
+    );
 
     let fatalPersistenceError = null;
     if (hasPersistenceTarget && !latestPersisted) {
@@ -356,12 +368,14 @@ export function createBrowserLifecycle(handle, opts = {}) {
       signal: details.signal || null,
       exitCode: details.signal
         ? SIGNAL_EXIT_CODES[details.signal] || 1
-        : cleanupErrors.length > 0 ? 1 : 0,
+        : persistenceIncomplete ? 8
+          : cleanupErrors.length > 0 ? 1 : 0,
       persistence: latestPersisted?.result?.results || null,
       persistedAt: latestPersisted?.persistedAt || null,
       usedCheckpointFallback: Boolean(
-        hasPersistenceTarget && (!canCaptureFresh || finalCaptureError),
+        hasPersistenceTarget && (!canCaptureFresh || !finalSnapshotPersisted),
       ),
+      persistenceIncomplete,
       finalCaptureError,
       cleanup,
       cleanupErrors,

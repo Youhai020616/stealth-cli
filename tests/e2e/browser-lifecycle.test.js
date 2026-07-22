@@ -1,26 +1,34 @@
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import {
   closeBrowser,
   launchBrowser,
 } from '../../src/browser.js';
 import { createBrowserLifecycle } from '../../src/browser-lifecycle.js';
+import { acquireStateLocks } from '../../src/utils/state-lock.js';
 import {
   createProfile,
   deleteProfile,
   loadProfile,
 } from '../../src/profiles.js';
 
+const ORIGINAL_STEALTH_HOME = process.env.STEALTH_HOME;
+const TEST_STEALTH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'stealth-lifecycle-e2e-'));
+process.env.STEALTH_HOME = TEST_STEALTH_HOME;
+
 let activeHandle = null;
 const createdProfiles = [];
-const SIGNAL_CHILD = path.join(
+const FIXTURES_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
   'fixtures',
-  'lifecycle-signal-child.js',
 );
+const SIGNAL_CHILD = path.join(FIXTURES_DIR, 'lifecycle-signal-child.js');
+const STATE_LOCK_CHILD = path.join(FIXTURES_DIR, 'state-lock-holder-child.js');
 
 function runLaunchSignal(signal) {
   return new Promise((resolve, reject) => {
@@ -57,12 +65,60 @@ function runLaunchSignal(signal) {
   });
 }
 
+function startStateLockHolder(kind, name) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [STATE_LOCK_CHILD, kind, name], {
+      cwd: path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..'),
+      env: { ...process.env, STEALTH_HOME: TEST_STEALTH_HOME },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let ready = false;
+    const exited = new Promise((resolveExit) => {
+      child.once('exit', (code, signal) => resolveExit({ code, signal, stderr }));
+    });
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`Timed out waiting for ${kind} ${name} lock`));
+    }, 10_000);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (!ready && stdout.includes('locked')) {
+        ready = true;
+        clearTimeout(timeout);
+        resolve({ child, exited });
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      if (!ready) {
+        clearTimeout(timeout);
+        reject(new Error(`Lock holder exited before ready (${code ?? signal}): ${stderr}`));
+      }
+    });
+  });
+}
+
 function uniqueProfile(label) {
   const name = `__e2e_${label}_${process.pid}_${Date.now()}`;
   createdProfiles.push(name);
   createProfile(name, { preset: 'us-laptop' });
   return name;
 }
+
+afterAll(() => {
+  if (ORIGINAL_STEALTH_HOME === undefined) delete process.env.STEALTH_HOME;
+  else process.env.STEALTH_HOME = ORIGINAL_STEALTH_HOME;
+  fs.rmSync(TEST_STEALTH_HOME, { recursive: true, force: true });
+});
 
 afterEach(async () => {
   if (activeHandle) {
@@ -74,6 +130,25 @@ afterEach(async () => {
       deleteProfile(profile);
     } catch {}
   }
+});
+
+describe('cross-process browser state locking', () => {
+  it('prevents two processes from opening the same named profile concurrently', async () => {
+    const { child, exited } = await startStateLockHolder('profile', 'shared-profile');
+
+    try {
+      expect(() => acquireStateLocks({ profile: 'shared-profile' }))
+        .toThrow('already in use');
+    } finally {
+      child.kill('SIGTERM');
+    }
+
+    const childResult = await exited;
+    expect(childResult).toMatchObject({ code: 0, signal: null, stderr: '' });
+
+    const release = acquireStateLocks({ profile: 'shared-profile' });
+    release();
+  }, 20_000);
 });
 
 describe('real Camoufox browser lifecycle', () => {

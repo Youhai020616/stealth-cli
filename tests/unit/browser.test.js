@@ -50,6 +50,10 @@ vi.mock('../../src/proxy-pool.js', () => ({
   reportProxy: vi.fn(),
 }));
 
+vi.mock('../../src/utils/state-lock.js', () => ({
+  acquireStateLocks: vi.fn(() => vi.fn()),
+}));
+
 // Now import the module under test
 import {
   launchBrowser,
@@ -69,6 +73,7 @@ import { getSession, restoreSession, saveSessionSnapshot } from '../../src/sessi
 import { getNextProxy } from '../../src/proxy-pool.js';
 import { daemonNavigate, daemonRequest } from '../../src/client.js';
 import { log } from '../../src/output.js';
+import { acquireStateLocks } from '../../src/utils/state-lock.js';
 
 // Helper: create mock browser/context/page and wire up createBrowser
 function setupMockBrowser() {
@@ -95,9 +100,19 @@ function setupMockBrowser() {
 describe('launchBrowser', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    isDaemonRunning.mockReturnValue(false);
+    getSession.mockReset().mockReturnValue({ profile: null });
+    restoreSession.mockReset().mockResolvedValue({
+      lastUrl: null,
+      history: [],
+      profile: null,
+    });
+    acquireStateLocks.mockReset().mockImplementation(() => vi.fn());
   });
 
-  it('should return daemon handle when daemon is running and no profile/proxy/session', async () => {
+  it('should return a daemon handle without retaining state locks', async () => {
+    const releaseStateLocks = vi.fn();
+    acquireStateLocks.mockReturnValue(releaseStateLocks);
     isDaemonRunning.mockReturnValue(true);
 
     const handle = await launchBrowser();
@@ -106,6 +121,7 @@ describe('launchBrowser', () => {
     expect(handle.browser).toBeNull();
     expect(handle.page).toBeNull();
     expect(createBrowser).not.toHaveBeenCalled();
+    expect(releaseStateLocks).toHaveBeenCalledOnce();
   });
 
   it('should skip daemon for an explicitly headed browser', async () => {
@@ -190,6 +206,38 @@ describe('launchBrowser', () => {
     });
   });
 
+  it('should infer and restore the linked profile for a session-only launch', async () => {
+    getSession.mockReturnValue({ profile: 'work' });
+    loadProfile.mockReturnValue({
+      fingerprint: { locale: 'en-US', timezone: 'UTC', viewport: { width: 1280, height: 720 }, os: 'macos' },
+      proxy: null,
+    });
+    const { mockContext } = setupMockBrowser();
+
+    const handle = await launchBrowser({ session: 'login', restoreSessionUrl: false });
+
+    expect(acquireStateLocks).toHaveBeenCalledWith({ profile: 'work', session: 'login' });
+    expect(loadProfile).toHaveBeenCalledWith('work');
+    expect(restoreSession).toHaveBeenCalledWith('login', mockContext, {
+      expectedProfile: 'work',
+      restoreCookies: false,
+    });
+    expect(handle._meta.profileName).toBe('work');
+  });
+
+  it('should skip a saved session URL when the caller has an explicit target', async () => {
+    restoreSession.mockResolvedValue({
+      lastUrl: 'https://saved.example/account',
+      history: [],
+      profile: null,
+    });
+    const { mockPage } = setupMockBrowser();
+
+    await launchBrowser({ session: 'login', restoreSessionUrl: false });
+
+    expect(mockPage.goto).not.toHaveBeenCalled();
+  });
+
   it('should redact query parameters when session URL restoration fails', async () => {
     isDaemonRunning.mockReturnValue(false);
     restoreSession.mockResolvedValue({
@@ -263,16 +311,38 @@ describe('launchBrowser', () => {
     expect(createBrowser).not.toHaveBeenCalled();
   });
 
-  it('should clean up a partially initialized browser', async () => {
-    isDaemonRunning.mockReturnValue(false);
+  it('should release state locks when a profile fails before browser launch', async () => {
+    const releaseStateLocks = vi.fn();
+    acquireStateLocks.mockReturnValue(releaseStateLocks);
+    loadProfile.mockImplementation(() => { throw new Error('Profile not found'); });
+
+    await expect(launchBrowser({ profile: 'missing' })).rejects.toThrow('Profile not found');
+
+    expect(releaseStateLocks).toHaveBeenCalledOnce();
+  });
+
+  it('should release state locks when browser creation fails', async () => {
+    const releaseStateLocks = vi.fn();
+    acquireStateLocks.mockReturnValue(releaseStateLocks);
+    createBrowser.mockRejectedValue(new Error('launch failed'));
+
+    await expect(launchBrowser({ session: 'login' })).rejects.toThrow('launch failed');
+
+    expect(releaseStateLocks).toHaveBeenCalledOnce();
+  });
+
+  it('should clean up a partially initialized browser and release state locks', async () => {
+    const releaseStateLocks = vi.fn();
+    acquireStateLocks.mockReturnValue(releaseStateLocks);
     const mockBrowser = {
       newContext: vi.fn().mockRejectedValue(new Error('context failed')),
       close: vi.fn().mockResolvedValue(undefined),
     };
     createBrowser.mockResolvedValue(mockBrowser);
 
-    await expect(launchBrowser()).rejects.toThrow('Browser initialization failed');
+    await expect(launchBrowser({ session: 'login' })).rejects.toThrow('Browser initialization failed');
     expect(mockBrowser.close).toHaveBeenCalledOnce();
+    expect(releaseStateLocks).toHaveBeenCalledOnce();
   });
 });
 
@@ -377,21 +447,23 @@ describe('closeBrowser', () => {
     await closeBrowser(handle);
   });
 
-  it('should close context and browser for direct handles', async () => {
+  it('should close direct handles and release their state locks', async () => {
     const mockContext = { close: vi.fn().mockResolvedValue(undefined), cookies: vi.fn() };
     const mockBrowser = { close: vi.fn().mockResolvedValue(undefined) };
+    const releaseStateLocks = vi.fn();
     const handle = {
       isDaemon: false,
       browser: mockBrowser,
       context: mockContext,
       page: { url: () => 'about:blank' },
-      _meta: {},
+      _meta: { releaseStateLocks },
     };
 
     await closeBrowser(handle);
 
     expect(mockContext.close).toHaveBeenCalled();
     expect(mockBrowser.close).toHaveBeenCalled();
+    expect(releaseStateLocks).toHaveBeenCalledOnce();
   });
 
   it('should make concurrent close calls idempotent', async () => {

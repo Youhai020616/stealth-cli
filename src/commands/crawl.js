@@ -3,12 +3,13 @@
  */
 
 import ora from 'ora';
-import { launchBrowser, closeBrowser, getTextContent, evaluate, waitForReady } from '../browser.js';
+import { launchBrowser, getTextContent, evaluate, waitForReady } from '../browser.js';
 import { navigateWithRetry } from '../retry.js';
 import { randomDelay, humanScroll } from '../humanize.js';
 import { formatOutput, log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 import { handleError } from '../errors.js';
+import { closeBrowserForCli } from '../utils/close-browser-cli.js';
 
 export function registerCrawl(program) {
   program
@@ -163,9 +164,9 @@ export function registerCrawl(program) {
         if (opts.output) log.dim(`  Output: ${opts.output}`);
       } catch (err) {
         spinner.stop();
-        handleError(err, { log });
+        process.exitCode = handleError(err, { log, exit: false });
       } finally {
-        if (handle) await closeBrowser(handle);
+        if (handle) await closeBrowserForCli(handle);
       }
     });
 }

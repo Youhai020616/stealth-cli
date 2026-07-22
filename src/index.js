@@ -22,12 +22,6 @@ export {
   typeRef,
   hoverRef,
 } from "./browser.js";
-export {
-  createBrowserLifecycle,
-  createLaunchSignalGuard,
-  DEFAULT_CHECKPOINT_INTERVAL,
-  SIGNAL_EXIT_CODES,
-} from "./browser-lifecycle.js";
 
 // Search
 export { expandMacro, getSupportedEngines } from "./macros.js";

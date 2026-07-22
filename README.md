@@ -62,6 +62,7 @@ stealth screenshot https://example.com -o page.png          # Screenshot
 stealth search google "best coffee beans" -f json           # Search Google
 stealth extract https://example.com --links                 # Extract links
 stealth crawl https://example.com -d 2 -l 50 -o out.jsonl  # Crawl
+stealth profile create work --preset us-laptop              # Create a saved identity once
 stealth open https://example.com --profile work              # Human login flow
 stealth interactive --url https://example.com               # REPL mode
 ```
@@ -128,7 +129,8 @@ stealth browse https://example.com                       # Text output
 stealth browse https://example.com -f json               # JSON with metadata
 stealth browse https://example.com -f snapshot            # Accessibility tree
 stealth browse https://example.com --humanize             # Human behavior simulation
-stealth browse https://example.com --profile us-desktop   # Saved identity
+stealth profile create work --preset us-desktop           # Create a saved identity once
+stealth browse https://example.com --profile work         # Reuse the saved identity
 stealth browse https://example.com --proxy http://proxy:8080
 ```
 
@@ -186,7 +188,7 @@ stealth open https://example.com/login --profile work
 stealth open --url https://example.com/login --profile work --session login-flow
 ```
 
-`open` is always headed and always uses a direct browser, even when the daemon is running. It ignores stdin, checkpoints cookies every second, performs a final live save when the last page closes, and gracefully handles `SIGHUP`, `SIGINT`, and `SIGTERM` on POSIX systems. If the browser process exits before a final live capture, the latest durable checkpoint is retained and a warning is printed.
+`open` is always headed and always uses a direct browser, even when the daemon is running. It ignores stdin, checkpoints cookies every second, performs a final live save when the last page closes, and gracefully handles `SIGHUP`, `SIGINT`, and `SIGTERM` on POSIX systems. If the browser process exits before a final live capture, the latest durable checkpoint is retained and a warning is printed. `--checkpoint-interval` accepts integer values from `250` through `60000` ms (default: `1000`).
 
 ### Interactive REPL
 
@@ -240,16 +242,24 @@ stealth open https://example.com/login --profile work
 ### Session Persistence
 
 ```bash
+# Link a named session to the existing work profile
 stealth browse https://example.com --session my-task --profile work
 # → Cookies + URL + history saved
 
-stealth browse https://other.com --session my-task
-# → Auto-restores cookies and last URL
+# Session-only open restores the linked work profile and the saved URL
+stealth open --session my-task
+
+# An explicit initial URL skips the session's saved URL
+stealth open https://other.com --session my-task
 ```
 
-When `--profile` and `--session` are combined, the profile is the canonical cookie source and the session restores URL/history metadata. A session already linked to a different profile is rejected instead of merging two identities.
+When `--profile` and `--session` are combined, the profile is the canonical cookie source and the session restores URL/history metadata. A session already linked to a different profile is rejected instead of merging two identities. When only `--session` is supplied, a linked profile is restored automatically. For `open` and `interactive`, an explicit initial URL takes precedence: stealth-cli skips the saved session URL before navigating to the requested URL.
 
-Profile and session JSON files contain authentication material. Writes are atomic; directories use owner-only permissions (`0700`) and files use `0600` on supported platforms. A hard browser crash can only preserve state captured by the most recent checkpoint; `open` defaults to a one-second interval.
+> **Behavior/security change:** Profile and session names may contain only ASCII letters, numbers, underscores, and hyphens (`[A-Za-z0-9_-]+`). If a session links to a profile that no longer exists, startup fails before the browser launches instead of silently falling back to a different identity.
+
+Named profile and session browser state is single-writer. A browser holds a lock for each named profile or session until close, so another browser cannot use the same state concurrently. Profile and session JSON files contain authentication material; writes are atomic, directories use owner-only permissions (`0700`), and files use `0600` on supported platforms.
+
+By default, profiles, sessions, and their locks live under `~/.stealth`. Set `STEALTH_HOME` to relocate those paths together. Configuration (`config.json`), proxy-pool (`proxies.json`), and daemon socket/PID paths remain under `~/.stealth` in the current source. A hard browser crash can only preserve state captured by the most recent checkpoint; `open` defaults to a one-second interval.
 
 ### Proxy Pool
 
@@ -345,12 +355,12 @@ Add stealth browsing capabilities to your AI coding assistant:
 
 ### SDK (Library Mode)
 
-Use stealth-cli programmatically in your Node.js applications:
+Use stealth-cli programmatically in your Node.js applications. The `work` profile must be created first, either with `stealth profile create work --preset us-desktop` or the SDK's `createProfile('work', { preset: 'us-desktop' })` API.
 
 ```javascript
 import { launchBrowser, closeBrowser, navigate, getTextContent } from 'stealth-cli';
 
-const handle = await launchBrowser({ profile: 'us-desktop', humanize: true });
+const handle = await launchBrowser({ profile: 'work', humanize: true });
 await navigate(handle, 'https://example.com');
 const text = await getTextContent(handle);
 await closeBrowser(handle);
@@ -373,7 +383,7 @@ stealth-cli provides structured errors with contextual hints:
   Hint: Create with: stealth profile create work
 ```
 
-Exit codes: `0` success · `3` browser launch · `4` navigation/blocked · `5` extraction · `7` proxy · `8` profile
+Exit codes: `0` success · `3` browser launch · `4` navigation/blocked · `5` extraction · `7` proxy · `8` profile/session/persistence
 
 ## Common Options
 
@@ -389,7 +399,7 @@ Option availability varies by command; run `stealth <command> --help` for the ex
 | `--humanize` | Simulate human behavior |
 | `--retries <n>` | Max retries on failure |
 | `--no-headless` | Show browser window on commands that default to headless |
-| `--checkpoint-interval <ms>` | `open` authentication-state checkpoint interval (default: 1000) |
+| `--checkpoint-interval <ms>` | `open` authentication-state checkpoint interval (`250`–`60000`; default: `1000`) |
 | `-f, --format` | Output format: text, json, jsonl, snapshot, markdown |
 
 ## Project Stats
