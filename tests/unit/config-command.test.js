@@ -26,7 +26,7 @@ function programForConfig() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   process.exitCode = undefined;
 });
 
@@ -83,12 +83,12 @@ describe('config command credential display', () => {
       throw new Error('storage failed password=do-not-leak');
     });
     const errorLog = vi.spyOn(log, 'error').mockImplementation(() => {});
-    vi.spyOn(log, 'dim').mockImplementation(() => {});
+    const dimLog = vi.spyOn(log, 'dim').mockImplementation(() => {});
 
     await programForConfig().parseAsync(['node', 'stealth', 'config', 'list']);
 
     expect(process.exitCode).toBe(1);
-    const rendered = errorLog.mock.calls.flat().join(' ');
+    const rendered = [...errorLog.mock.calls, ...dimLog.mock.calls].flat().join(' ');
     expect(rendered).toContain('Failed to read global configuration');
     expect(rendered).not.toContain('do-not-leak');
   });
@@ -101,12 +101,12 @@ describe('config command credential display', () => {
       throw storageError;
     });
     const errorLog = vi.spyOn(log, 'error').mockImplementation(() => {});
-    vi.spyOn(log, 'dim').mockImplementation(() => {});
+    const dimLog = vi.spyOn(log, 'dim').mockImplementation(() => {});
 
     await programForConfig().parseAsync(['node', 'stealth', 'config', 'reset']);
 
     expect(process.exitCode).toBe(8);
-    const rendered = errorLog.mock.calls.flat().join(' ');
+    const rendered = [...errorLog.mock.calls, ...dimLog.mock.calls].flat().join(' ');
     expect(rendered).toContain('Failed to reset global configuration (ENOSPC during write)');
     expect(rendered).not.toContain('do-not-leak');
   });
