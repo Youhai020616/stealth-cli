@@ -12,6 +12,8 @@
  *   4. Interaction by ref uses [data-stealth-ref="eN"] CSS selector
  */
 
+import { clickElement } from './utils/click.js';
+
 // --- Role classification sets ---
 
 const INTERACTIVE_ROLES = new Set([
@@ -306,7 +308,7 @@ export function refSelector(ref) {
  * @param {string} ref - Ref ID from accessibility snapshot
  */
 export async function clickByRef(page, ref) {
-  await page.click(refSelector(ref), { timeout: 5000 });
+  await clickElement(page, refSelector(ref), { timeout: 5000 });
 }
 
 /**
@@ -323,7 +325,7 @@ export async function clickByRef(page, ref) {
 export async function typeByRef(page, ref, text, opts = {}) {
   const selector = refSelector(ref);
   if (opts.slowly) {
-    await page.click(selector, { timeout: 5000 });
+    await clickElement(page, selector, { timeout: 5000 });
     if (opts.clear !== false) {
       await page.fill(selector, '');
     }

@@ -14,6 +14,7 @@ import {
   extractPageText,
 } from "../utils/browser-factory.js";
 import { buildA11yTree, clickByRef, typeByRef } from "../a11y.js";
+import { clickElement } from "../utils/click.js";
 
 export function registerServe(program) {
   program
@@ -204,7 +205,7 @@ export function registerServe(program) {
 
               case "click": {
                 const { selector } = body;
-                await page.click(selector, { timeout: 5000 });
+                await clickElement(page, selector, { timeout: 5000 });
                 return json(res, { ok: true, url: page.url() });
               }
 

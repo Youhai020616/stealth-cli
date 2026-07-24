@@ -25,6 +25,7 @@ import {
   extractPageText,
 } from "./utils/browser-factory.js";
 import { buildA11yTree, clickByRef, typeByRef } from "./a11y.js";
+import { clickElement } from "./utils/click.js";
 
 const require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = require("../package.json");
@@ -413,7 +414,7 @@ class McpServer {
         if (args.ref) {
           await clickByRef(page, args.ref);
         } else if (args.selector) {
-          await page.click(args.selector, { timeout: 5000 });
+          await clickElement(page, args.selector, { timeout: 5000 });
         } else {
           return text('Error: provide either "ref" or "selector"');
         }

@@ -7,6 +7,7 @@ import { launchBrowser, closeBrowser, navigate, waitForReady } from '../browser.
 import { log } from '../output.js';
 import { resolveOpts } from '../utils/resolve-opts.js';
 import { handleError } from '../errors.js';
+import { writeJpegPdf } from '../utils/pdf.js';
 
 export function registerPdf(program) {
   program
@@ -70,23 +71,34 @@ export function registerPdf(program) {
             margin: { top: `${opts.margin}px`, right: `${opts.margin}px`, bottom: `${opts.margin}px`, left: `${opts.margin}px` },
           });
         } catch {
-          // Firefox fallback: emulate print media and take full screenshot
-          // This creates a high-quality image, not a true PDF
-          spinner.text = 'Firefox detected — using screenshot-based PDF...';
+          spinner.text = 'Firefox detected — generating screenshot-based PDF...';
 
-          const outputFile = opts.output.endsWith('.pdf')
-            ? opts.output.replace(/\.pdf$/, '.png')
-            : opts.output + '.png';
-
-          await handle.page.screenshot({
-            path: outputFile,
-            fullPage: true,
-            type: 'png',
+          const dimensions = await handle.page.evaluate(() => {
+            const doc = document.documentElement;
+            const body = document.body;
+            return {
+              width: Math.ceil(Math.max(
+                doc?.scrollWidth || 0,
+                body?.scrollWidth || 0,
+                window.innerWidth || 0,
+              )),
+              height: Math.ceil(Math.max(
+                doc?.scrollHeight || 0,
+                body?.scrollHeight || 0,
+                window.innerHeight || 0,
+              )),
+            };
           });
 
+          const jpeg = await handle.page.screenshot({
+            fullPage: true,
+            type: 'jpeg',
+            quality: 90,
+          });
+          writeJpegPdf(jpeg, dimensions.width, dimensions.height, opts.output);
+
           log.warn('Firefox/Camoufox does not support native PDF generation');
-          log.dim(`  Full-page screenshot saved instead: ${outputFile}`);
-          log.dim('  Tip: Use a tool like "img2pdf" to convert: img2pdf screenshot.png -o page.pdf');
+          log.dim(`  Screenshot-based PDF saved: ${opts.output}`);
 
           spinner.stop();
           return;

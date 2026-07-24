@@ -18,11 +18,16 @@ vi.mock("../../src/a11y.js", () => ({
   typeByRef: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("../../src/utils/click.js", () => ({
+  clickElement: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { McpServer } from "../../src/mcp-server.js";
 import {
   createBrowser,
   createContext,
 } from "../../src/utils/browser-factory.js";
+import { clickElement } from "../../src/utils/click.js";
 
 function setupMockBrowser() {
   const mockPage = {
@@ -158,7 +163,8 @@ describe("McpServer", () => {
       });
 
       expect(result[0].text).toContain("Clicked");
-      expect(mockPage.click).toHaveBeenCalledWith(
+      expect(clickElement).toHaveBeenCalledWith(
+        mockPage,
         "button.submit",
         expect.any(Object),
       );
